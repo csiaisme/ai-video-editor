@@ -85,8 +85,8 @@ def _fmt(t: float) -> str:
 def verify(preview: Path, transcript_path: Path, edl_path: Path,
            fixes: dict[str, str] | None, language: str | None,
            min_block: int = 4) -> int:
-    transcript = json.loads(transcript_path.read_text())
-    edl = json.loads(edl_path.read_text())
+    transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+    edl = json.loads(edl_path.read_text(encoding="utf-8"))
 
     exp_raw = expected_from_edl(transcript, edl)
     act_raw, act_words = actual_from_preview(preview, language)
@@ -168,7 +168,7 @@ def main() -> None:
     for p in (args.preview, args.transcript, args.edl):
         if not p.exists():
             sys.exit(f"not found: {p}")
-    fixes = json.loads(args.fixes.read_text()) if args.fixes and args.fixes.exists() else None
+    fixes = json.loads(args.fixes.read_text(encoding="utf-8")) if args.fixes and args.fixes.exists() else None
 
     rc = verify(args.preview, args.transcript, args.edl, fixes, args.language, args.min_block)
     sys.exit(rc)

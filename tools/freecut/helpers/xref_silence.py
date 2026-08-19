@@ -44,7 +44,8 @@ def mean_volume(video):
     (verified: sonnet floor ~-56dB, demo ~-45dB; -40 is clean on one, floods
     the other). -vn: audio only, no video decode (fast even on 4K)."""
     out = subprocess.run(["ffmpeg", "-vn", "-i", video, "-af", "volumedetect",
-                          "-f", "null", "-"], capture_output=True, text=True).stderr
+                          "-f", "null", "-"], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace").stderr
     m = re.search(r"mean_volume:\s*(-?[\d.]+)", out)
     return float(m.group(1)) if m else None
 
@@ -53,7 +54,8 @@ def silence_windows(video, noise_db, min_sil):
     # audio track wastes minutes. Audio-only makes it fast even on 4K sources.
     cmd = ["ffmpeg", "-vn", "-i", video, "-af",
            f"silencedetect=noise={noise_db}dB:d={min_sil}", "-f", "null", "-"]
-    out = subprocess.run(cmd, capture_output=True, text=True).stderr
+    out = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace").stderr
     starts = [float(m) for m in re.findall(r"silence_start: ([\d.]+)", out)]
     ends   = [float(m) for m in re.findall(r"silence_end: ([\d.]+)", out)]
     return list(zip(starts, ends))
@@ -90,7 +92,7 @@ def main():
                          "-35.9→-29.9); widen if GAP over-flags, tighten if it misses.")
     a = ap.parse_args()
 
-    words = [w for w in json.load(open(a.transcript))["words"] if w.get("type") == "word"]
+    words = [w for w in json.load(open(a.transcript, encoding="utf-8"))["words"] if w.get("type") == "word"]
     sils = silence_windows(a.video, a.noise, 0.10)  # detect gaps >=100ms, filter later
     # Separate, more sensitive silence pass for GAP: a swallowed half-word is often
     # quiet enough that the -30dB pass calls it silence. MERGE/LONG keep the -30 pass.

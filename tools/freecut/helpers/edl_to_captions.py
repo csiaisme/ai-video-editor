@@ -47,7 +47,7 @@ def display_width(s):
 
 
 def load_words(transcript_path):
-    data = json.loads(Path(transcript_path).read_text())
+    data = json.loads(Path(transcript_path).read_text(encoding="utf-8"))
     words = data["words"] if isinstance(data, dict) else data
     out = []
     for w in words:
@@ -133,8 +133,8 @@ def main():
                     help="max display width per line (CJK=2, ASCII=1)")
     args = ap.parse_args()
 
-    ranges = json.loads(Path(args.edl).read_text())["ranges"]
-    fixes = json.loads(Path(args.fixes).read_text()) if args.fixes else {}
+    ranges = json.loads(Path(args.edl).read_text(encoding="utf-8"))["ranges"]
+    fixes = json.loads(Path(args.fixes).read_text(encoding="utf-8")) if args.fixes else {}
 
     words = merge_latin(map_to_output(load_words(args.transcript), ranges))
 
@@ -161,7 +161,7 @@ def main():
         sys.exit(f"BUG: overlapping captions at indexes {overlaps} — report this")
 
     Path(args.output).write_text(
-        json.dumps(caps, ensure_ascii=False, indent=1))
+        json.dumps(caps, ensure_ascii=False, indent=1), encoding="utf-8")
     for i, c in enumerate(caps):
         print(f"{i:3} {c['start']:7.2f}-{c['end']:7.2f}  {c['text']}")
     print(f"\n{len(caps)} lines → {args.output}  (no overlaps)")

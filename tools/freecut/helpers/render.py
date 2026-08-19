@@ -125,6 +125,7 @@ def is_hdr_source(video: Path) -> bool:
              "-show_entries", "stream=color_transfer",
              "-of", "default=noprint_wrappers=1:nokey=1", str(video)],
             capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace",
         )
         return out.stdout.strip() in HDR_TRANSFERS
     except subprocess.CalledProcessError:
@@ -149,6 +150,7 @@ def video_display_size(video: Path) -> tuple[int, int] | None:
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_streams", "-of", "json", str(video)],
             capture_output=True, text=True, check=True,
+            encoding="utf-8", errors="replace",
         )
         stream = (json.loads(out.stdout).get("streams") or [{}])[0]
         w = int(stream.get("width") or 0)
@@ -307,7 +309,12 @@ def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -
     """Lossless concat via the concat demuxer. No re-encode."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     concat_list = edit_dir / "_concat.txt"
-    concat_list.write_text("".join(f"file '{p.resolve()}'\n" for p in segment_paths))
+    # encoding 一定要指定:Windows 預設 cp950,專案路徑含中文時寫出來的清單
+    # ffmpeg(讀 UTF-8)會解成亂碼 → 找不到檔案 → concat 失敗。
+    concat_list.write_text(
+        "".join(f"file '{p.resolve()}'\n" for p in segment_paths),
+        encoding="utf-8",
+    )
 
     cmd = [
         "ffmpeg", "-y",
@@ -376,7 +383,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
             seg_offset += seg_duration
             continue
 
-        transcript = json.loads(tr_path.read_text())
+        transcript = json.loads(tr_path.read_text(encoding="utf-8"))
         words_in_seg = _words_in_range(transcript, seg_start, seg_end)
 
         # Group into 2-word chunks, break on punctuation
@@ -419,7 +426,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
         lines.append(f"{_srt_timestamp(a)} --> {_srt_timestamp(b)}")
         lines.append(t)
         lines.append("")
-    out_path.write_text("\n".join(lines))
+    out_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"master SRT → {out_path.name} ({len(entries)} cues)")
 
 
@@ -448,7 +455,8 @@ def measure_loudness(video_path: Path) -> dict[str, str] | None:
         "-af", filter_str,
         "-vn", "-f", "null", "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     # loudnorm prints the JSON to stderr at the end of the run
     stderr = proc.stderr
 
@@ -646,7 +654,7 @@ def main() -> None:
     if not edl_path.exists():
         sys.exit(f"edl not found: {edl_path}")
 
-    edl = json.loads(edl_path.read_text())
+    edl = json.loads(edl_path.read_text(encoding="utf-8"))
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 

@@ -228,7 +228,7 @@ def main() -> None:
 
     if not args.captions.exists():
         sys.exit(f"captions not found: {args.captions}")
-    captions = json.loads(args.captions.read_text())
+    captions = json.loads(args.captions.read_text(encoding="utf-8"))
     if not isinstance(captions, list) or not captions:
         sys.exit("captions JSON must be a non-empty list of {start,end,text}")
 

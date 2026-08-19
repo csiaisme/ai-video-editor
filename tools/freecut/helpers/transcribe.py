@@ -70,7 +70,7 @@ def _read_env_file() -> dict[str, str]:
     for candidate in [Path(__file__).resolve().parent.parent / ".env", Path(".env")]:
         if not candidate.exists():
             continue
-        for line in candidate.read_text().splitlines():
+        for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -607,7 +607,7 @@ def transcribe_one(
             api_key=api_key,
         )
 
-    out_path.write_text(json.dumps(payload, indent=2))
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     # Always drop a compact companion the reading agent should use instead of
     # the fat JSON (see write_compact). Cheap to produce, big token saver.
     compact_path = out_path.with_suffix(".words.txt")

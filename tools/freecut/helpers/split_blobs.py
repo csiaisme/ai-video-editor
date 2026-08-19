@@ -25,7 +25,8 @@ def main():
     dur = a.end - a.start
     cmd = ["ffmpeg", "-ss", str(a.start), "-i", a.video, "-t", str(dur),
            "-af", f"silencedetect=noise={a.noise}dB:d={a.min_sil}", "-f", "null", "-"]
-    out = subprocess.run(cmd, capture_output=True, text=True).stderr
+    out = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace").stderr
     starts = [float(m) for m in re.findall(r"silence_start: ([\d.]+)", out)]
     ends   = [float(m) for m in re.findall(r"silence_end: ([\d.]+)", out)]
     sils = sorted(zip(starts, ends))
