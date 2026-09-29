@@ -108,15 +108,41 @@ def build(captions: list[dict], video: str, w: int, h: int,
     )
     fam_stack = ", ".join(f'"{fam}"' for fam in f["families"])
 
-    subs = []
+    # ★ 長句自動縮字級。字幕是 nowrap + 置中,寬度超過字幕框(左右各讓出按鈕欄)時
+    # 不會換行,而是往右溢出被切掉,而且整句看起來「偏一邊」(選段demo 2026-09-29:
+    # 66px 的 14 字句要 924px,框只有 842px,Jake 審成品才抓到,五句都中)。
+    # 所以逐句量:全形字/標點算 1 個字寬,ASCII 算 0.55,emphasis 款的關鍵字算 1.4,
+    # 超出就只把那一句縮到剛好放得下。其他句維持使用者指定的字級。
+    pad = re.search(r"padding:\s*\d+px\s+(\d+)px", st_inner)
+    room = (w - 2 * round(w * 0.11)) - 2 * (int(pad.group(1)) if pad else 0) - 8
+    kw_scale = 1.4 if "1.4em" in st_kw else 1.0
+
+    def units(text: str, hl: str | None) -> float:
+        u = sum(0.55 if ord(ch) < 0x2E80 else 1.0 for ch in text if not ch.isspace())
+        u += 0.55 * sum(1 for ch in text if ch == " ")
+        if hl and hl in text and kw_scale != 1.0:
+            u += (kw_scale - 1.0) * sum(0.55 if ord(ch) < 0x2E80 else 1.0 for ch in hl)
+        return u
+
+    subs, shrunk = [], []
     for i, c in enumerate(captions):
         dur = round(float(c["end"]) - float(c["start"]), 2)
+        u = units(c["text"], c.get("hl"))
+        size_attr = ""
+        if u * font_size > room:
+            fs = int(room / u * 10) / 10
+            size_attr = f' style="font-size:{fs}px"'
+            shrunk.append((i, c["text"], fs))
         subs.append(
-            f'      <div id="sub-{i}" class="clip sub" data-start="{c["start"]}" '
+            f'      <div id="sub-{i}" class="clip sub"{size_attr} data-start="{c["start"]}" '
             f'data-duration="{dur}" data-track-index="5">'
             f'<span class="sub-inner">{hl_html(c["text"], c.get("hl"), c.get("hl_color"))}</span></div>'
         )
     subs_html = "\n".join(subs)
+    if shrunk:
+        print(f"長句縮字級({len(shrunk)} 句超過字幕框 {room}px,只縮這幾句):", file=sys.stderr)
+        for i, t, fs in shrunk:
+            print(f"  sub-{i}  {fs}px  {t}", file=sys.stderr)
 
     return f'''<!doctype html>
 <html lang="zh-Hant">

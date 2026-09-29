@@ -107,10 +107,11 @@ if (-not (Test-Path $VPY)) { Write-Host "[X] Python 環境沒建成功。確認 
 # pip 一律讓輸出看得見 — 之前用 -q + Out-Null,PyPI 塞車時畫面靜止 12 分鐘,
 # 學員(跟 AI)都以為當機。有進度在動就不會誤判。
 & $VPY -m pip install --upgrade pip | Out-Null
-Write-Host "   安裝核心套件 (requests, pillow, numpy, opencc) ..."
+Write-Host "   安裝核心套件 (requests, pillow, numpy, opencc, jieba) ..."
 # opencc-python-reimplemented: 簡轉繁,純 Python(沒 C++ DLL)。刻意不用 PyPI 的
 # `opencc`,那個帶未簽章 DLL,在 Windows 可能又被 Smart App Control 擋。
-& $VPY -m pip install requests pillow numpy opencc-python-reimplemented
+# jieba: 中文斷詞,純 Python。字幕斷行用,不讓 Whisper 的單字 token 把詞切兩半(「自/然」)。
+& $VPY -m pip install requests pillow numpy opencc-python-reimplemented jieba
 
 # --- 3. 逐字稿引擎:先試 pip faster-whisper,擋住就引導 XXL 獨立版 --------
 Write-Host "   先試 faster-whisper(pip)... 下載幾百 MB,PyPI 塞車時可能 10 分鐘以上,慢不是當機。"

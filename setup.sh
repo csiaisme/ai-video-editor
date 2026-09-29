@@ -55,11 +55,12 @@ if [ ! -f "$VPY" ]; then
 fi
 "$VPY" -m pip install -q --upgrade pip >/dev/null 2>&1
 
-echo "   安裝核心套件 (requests, pillow, numpy, opencc) ..."
+echo "   安裝核心套件 (requests, pillow, numpy, opencc, jieba) ..."
 # opencc-python-reimplemented: 簡轉繁,純 Python(沒有 C++ DLL)。刻意不用 PyPI 的
 # `opencc`,因為那個帶未簽章 DLL,在 Windows 上可能又被 Smart App Control 擋 —
 # 我們就是為了躲這個才走 XXL,不能在轉繁這步又踩回去。API 一樣是 OpenCC("s2twp")。
-"$VPY" -m pip install -q requests pillow numpy opencc-python-reimplemented
+# jieba: 中文斷詞,純 Python。字幕斷行用,不讓 Whisper 的單字 token 把詞切兩半(「自/然」)。
+"$VPY" -m pip install -q requests pillow numpy opencc-python-reimplemented jieba
 
 # --- 2. 依平台裝 Whisper 引擎 -----------------------------------------------
 UNAME="$(uname -s 2>/dev/null || echo unknown)"
