@@ -29,16 +29,16 @@ cutlist_to_edl.py — 把「長錄影選段」清單裡的某一支,變成這支
 import argparse, html, json, re, subprocess, sys
 from pathlib import Path
 
-TC = r"(\d{1,2}:\d{2}(?::\d{2})?)"
+TC = r"(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)"   # 25:37 / 25:37.7 / 1:02:03.4
 RANGE_RE = re.compile(TC + r"\s*(?:→|->|－>|—>)\s*" + TC)
 
 
 def tc2s(tc):
-    parts = [int(p) for p in tc.split(":")]
-    s = 0
-    for p in parts:
-        s = s * 60 + p
-    return float(s)
+    parts = tc.split(":")
+    s = 0.0
+    for p in parts[:-1]:
+        s = s * 60 + int(p)
+    return s * 60 + float(parts[-1])
 
 
 def s2tc(s):
@@ -102,18 +102,22 @@ def pauses(audio, min_len=0.12):
     return spans
 
 
-def snap_start(t, spans):
+def snap_start(t, spans, fine=False):
     # 清單的起點是「那句字幕開始的那一秒」(無條件捨去),真的開口在 [t, t+1) 附近。
     # 找 [t-1.2, t+1.2] 裡最接近 t+0.5 的停頓結束點,起點放在開口前 0.05 秒。
-    c = [e for s, e in spans if t - 1.2 <= e <= t + 1.2]
-    return (max(0.0, min(c, key=lambda e: abs(e - (t + 0.5))) - 0.05), True) if c else (t, False)
+    # 清單有到 0.1 秒時,t 就是那句的 SRT 起點(Whisper 偏早 0.2-0.4),只在 [t-0.4, t+0.5] 找
+    lo, hi, aim = (t - 0.4, t + 0.5, t + 0.15) if fine else (t - 1.2, t + 1.2, t + 0.5)
+    c = [e for s, e in spans if lo <= e <= hi]
+    return (max(0.0, min(c, key=lambda e: abs(e - aim)) - 0.05), True) if c else (max(0.0, t - 0.05), False)
 
 
-def snap_end(t, spans):
+def snap_end(t, spans, fine=False):
     # 清單的終點是最後一句的「結束秒」,真正收音在 [t, t+1) 附近。
     # 找 [t-0.8, t+1.8] 裡最接近 t+0.5 的停頓開始點,收在字尾後 0.1 秒。
-    c = [s for s, e in spans if t - 0.8 <= s <= t + 1.8]
-    return (min(c, key=lambda s: abs(s - (t + 0.5))) + 0.1, True) if c else (t + 0.9, False)
+    # 到 0.1 秒時 t 是 SRT 終點,實測比真的講完晚 0.4-0.5 秒(選段demo 三段都是),往前找
+    lo, hi, aim = (t - 0.8, t + 0.4, t - 0.3) if fine else (t - 0.8, t + 1.8, t + 0.5)
+    c = [s for s, e in spans if lo <= s <= hi]
+    return (min(c, key=lambda s: abs(s - aim)) + 0.1, True) if c else ((t + 0.1) if fine else (t + 0.9), False)
 
 
 def main():
@@ -136,7 +140,9 @@ def main():
     if not clip:
         sys.exit(f"選段清單裡找不到第 {args.clip} 支")
     pos = strip(clip["rows"].get("位置", ""))
-    ranges = [(tc2s(a), tc2s(b)) for a, b in RANGE_RE.findall(pos)]
+    found = RANGE_RE.findall(pos)
+    fine = bool(found) and all("." in a and "." in b for a, b in found)   # 新版清單到 0.1 秒
+    ranges = [(tc2s(a), tc2s(b)) for a, b in found]
     if not ranges:
         sys.exit(f"第 {args.clip} 支的「位置」沒有時間碼(可能是沒時間碼的逐字稿,要照原話定位):{pos}")
     bad = [(a, b) for a, b in ranges if b <= a]
@@ -176,8 +182,8 @@ def main():
     spans = pauses(excerpt)
     edl_ranges, notes = [], []
     for k, (a, b) in enumerate(ranges, 1):
-        s, ok_s = snap_start(a - t0, spans)
-        e, ok_e = snap_end(b - t0, spans)
+        s, ok_s = snap_start(a - t0, spans, fine)
+        e, ok_e = snap_end(b - t0, spans, fine)
         flag = "" if ok_s and ok_e else "(附近沒有明顯停頓,照清單秒數,一定要查波形)"
         notes.append(f"{k}. 原片 {s2tc(a)}→{s2tc(b)} → 片段 {s:.2f}-{e:.2f}{flag}")
         edl_ranges.append({"source": "SRC", "start": round(s, 2), "end": round(e, 2),
