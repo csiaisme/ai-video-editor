@@ -6,7 +6,7 @@
 每輪出新 preview 後重跑一次(直接覆蓋舊的)。
 
 用法:
-    python3 make_review_page.py <審片區資料夾> <影片檔名> [字幕.json路徑] [--burned-in|--no-burned-in]
+    python3 make_review_page.py <審片區資料夾> <影片檔名> [字幕.json路徑] [--burned-in|--no-burned-in] [--no-open]
 
     <影片檔名>   審片區裡那支影片的「檔名」(相對路徑,不是完整路徑)
     [字幕路徑]   預設用 <審片區>/字幕.json
@@ -14,6 +14,8 @@
                  帶這個旗標時,審片頁不會再疊一層預覽字幕 — 否則畫面上會出現
                  兩層字幕互相重疊。預設會自動判斷:檔名以「成品」開頭就當作已燒進去。
                  --no-burned-in 可強制關掉自動判斷。
+    --no-open    產生完不要幫使用者打開(預設會用瀏覽器直接打開這頁 —
+                 學員回報 15 次找不到審片區/成品,AI 直接幫他開的那幾次全部一次解決)。
 
 每輪產生時會寫入一個「輪次戳記」。審片頁看到新的戳記,就知道這是 AI 出的新一版,
 會把上一輪殘留的註解清掉 — 使用者不用再一則一則點叉叉。
@@ -125,6 +127,9 @@ def main() -> int:
     n = "?" if subs_txt == "null" else len(json.loads(subs_txt))
     burned_note = ",字幕已燒進畫面(不疊預覽字幕)" if burned_in else ""
     print(f"[OK] 產生 {out}(影片 {video_name},字幕 {n} 句{burned_note})— 雙擊即審,免拖檔")
+    if "--no-open" not in flags:
+        from open_file import open_for_user   # 同資料夾的 helper
+        open_for_user(out)
     return 0
 
 
