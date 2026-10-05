@@ -292,13 +292,15 @@ def protect_fix_words(words, fixes):
             owner.append(i)
         joined += w["text"]
         owner += [i] * len(w["text"])
+    hay = joined.lower() if LATIN else joined          # 英文不分大小寫(lower 不改長度,索引對得上)
     for term in {t for kv in fixes.items() for t in kv if len(t) >= 2}:
-        start = joined.find(term)
+        needle = term.lower() if LATIN else term
+        start = hay.find(needle)
         while start != -1:
             idx = owner[start:start + len(term)]
             for i in range(idx[0], idx[-1]):
                 NOBREAK.add(i)
-            start = joined.find(term, start + 1)
+            start = hay.find(needle, start + 1)
 
 
 def best_break(cur, max_width, ok=None):
@@ -480,8 +482,13 @@ def main():
     ap.add_argument("--fixes", help="JSON dict of mishear fixes {wrong: right}")
     ap.add_argument("--gap", type=float, default=0.30,
                     help="original-audio pause (s) that allows a line break")
-    ap.add_argument("--max-width", type=int, default=26,
-                    help="max display width per line (CJK=2, ASCII=1)")
+    ap.add_argument("--max-width", type=int, default=None,
+                    help="max display width per line (CJK=2, ASCII=1)。預設 26;"
+                         "有給 --font-size 就照字級算,直接給這個就以這個為準")
+    ap.add_argument("--font-size", type=int, default=None,
+                    help="填跟 gen_captions --font-size 一樣的數字。英文影片:一行的長度照字級算到剛好放得下;"
+                         "中文影片不受影響,照舊固定 26")
+    ap.add_argument("--video-width", type=int, default=1080, help="跟 gen_captions --w 一樣")
     ap.add_argument("--audio", help="量停頓用的音訊/影片。預設:EDL 模式用 EDL 的來源影片,"
                                     "--no-edl 模式一定要給(就是那支 preview)")
     args = ap.parse_args()
@@ -522,8 +529,27 @@ def main():
     LATIN = is_latin_transcript(raw, tdata.get("language") if isinstance(tdata, dict) else None)
     if LATIN:
         print("  英文模式:字間加空格、不合併英文碎片、句號問號優先斷行", file=sys.stderr)
+
+    # ★ 一行多長要跟字級一起算。固定 26 是照 56px 抓的;字級 66 時同樣長度放不下,
+    #   gen_captions 只好把那句縮小 — IMG_2135(66px)82 句裡 31 句被縮,大小忽大忽小。
+    #   字幕框寬度用 gen_captions 的同一條公式(classic 款,左右各讓 26px padding),
+    #   每個字的寬也照它的估法:全形字 = 1 個字級寬,英文字母約 0.55 個字級寬。
+    #   只套英文:中文照舊固定 26(Jake 2026-10-05 決定。中文在 66px 換算是一行 11 字,縮字級的句子
+    #   變少,但多出「趨勢線然後」這種短行 — 中文斷行品質卡在斷詞,不在寬度,先不動)。
+    if args.max_width is None:
+        if args.font_size and LATIN:
+            W = args.video_width
+            room = (W - 2 * round(W * 0.11)) - 2 * 26 - 8
+            args.max_width = int(room / (0.55 * args.font_size))
+            print(f"  一行長度照字級算:{args.font_size}px → --max-width {args.max_width}", file=sys.stderr)
+        else:
+            args.max_width = 26
     kept = map_to_output(raw, ranges)
     words = kept if LATIN else merge_latin(kept)   # 碎片合併只給中文模式(英文會把整句黏成一個字)
+
+    # 英文不分大小寫:Whisper 大小寫很隨機(同一個詞這次 "Thron pick"、下次 "Thron Pick"),
+    # fixes 只寫一種就要兩種都對到。中文模式照舊(字一模一樣才換)。
+    fixes_ci = {k.lower(): v for k, v in fixes.items()} if LATIN else {}
 
     # single-token fixes before grouping
     for w in words:
@@ -532,8 +558,8 @@ def main():
             w["text"] = fixes[t]
         elif LATIN:   # 英文 token 自帶標點:"Boars," 也要對到 fixes 的 "Boars"
             core = t.rstrip(".,!?;:")
-            if core != t and core in fixes:
-                w["text"] = fixes[core] + t[len(core):]
+            if core.lower() in fixes_ci:
+                w["text"] = fixes_ci[core.lower()] + t[len(core):]
     protect_fix_words(words, fixes)
     mark_seams(words)
 
@@ -543,7 +569,11 @@ def main():
     for ln in lines:
         text = join_tokens([x["text"] for x in ln])
         for wrong, right in fixes.items():      # multi-token fixes on joined text
-            text = text.replace(wrong, right)
+            if LATIN:   # 不分大小寫,而且要整個字對到("Boars" 不會吃掉 "Boarsmith" 的一半)
+                text = re.sub(r"(?<!\w)" + re.escape(wrong) + r"(?!\w)",
+                              lambda m, r=right: r, text, flags=re.IGNORECASE)
+            else:
+                text = text.replace(wrong, right)
         caps.append({
             "start": round(ln[0]["os"], 2),
             "end": round(ln[-1]["oe"], 2),

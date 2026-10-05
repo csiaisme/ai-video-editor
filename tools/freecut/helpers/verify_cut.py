@@ -44,18 +44,31 @@ def _norm(s: str, fixes: dict[str, str] | None = None) -> str:
     return "".join(ch for ch in s if _KEEP.match(ch)).lower()
 
 
+EDGE_GUARD = 0.03   # 跟 edl_to_captions / render.py 的 30ms 音訊 fade 一致
+
+
 def expected_from_edl(transcript: dict, edl: dict) -> str:
-    """Concatenate source words that fall inside each EDL range, in the order the
-    ranges appear (so reordered/kept-later takes are handled)."""
+    """Concatenate source words kept by each EDL range, in the order the
+    ranges appear (so reordered/kept-later takes are handled).
+
+    ★ 用「字的範圍跟 range 有重疊」判斷留下來沒,不要用中點。Whisper 的字常把旁邊的停頓
+    吞進自己的範圍(英文 "telling" 9.60-10.48,真正的聲音在 10.31 之後;中文是吞進前一個字),
+    中點就落在被剪掉的停頓裡 → 以為這個字被剪了、其實還在,對稿報一堆假警報
+    (IMG_2135 實測 29 個字、16 處假警報)。edl_to_captions 2026-09-23 修過同一個坑,
+    這裡用同一套規則:重疊就算留下,算給重疊最多的那一段。兩支工具對「哪些字留著」才一致。"""
     words = [w for w in transcript.get("words", []) if w.get("type") != "spacing"]
-    out = []
-    for r in edl.get("ranges", []):
-        s, e = float(r["start"]), float(r["end"])
-        for w in words:
-            mid = (float(w["start"]) + float(w["end"])) / 2.0
-            if s <= mid <= e:
-                out.append((w.get("text") or ""))
-    return "".join(out)
+    ranges = edl.get("ranges", [])
+    kept: list[list[dict]] = [[] for _ in ranges]
+    for w in words:
+        ws, we = float(w["start"]), float(w["end"])
+        best = None
+        for i, r in enumerate(ranges):
+            ov = min(we, float(r["end"]) - EDGE_GUARD) - max(ws, float(r["start"]))
+            if ov > 0 and (best is None or ov > best[0]):
+                best = (ov, i)
+        if best is not None:
+            kept[best[1]].append(w)
+    return "".join((w.get("text") or "") for seg in kept for w in seg)
 
 
 def actual_from_preview(preview: Path, language: str | None) -> tuple[str, list]:

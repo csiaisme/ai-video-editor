@@ -275,14 +275,16 @@ range 的時間全部用**原始影片的秒數**。輸出:`$PY $H/render.py 工
 
 **第一步:captions.json(時間 + 斷句 + highlight)**
 ```bash
-$PY $H/edl_to_captions.py <transcript.json> <edl.json> -o captions.json --fixes fixes.json
+$PY $H/edl_to_captions.py <transcript.json> <edl.json> -o captions.json --fixes fixes.json --font-size <跟 gen_captions 同一個數字>
 ```
 它做 EDL 重算、英文碎片合併、時間夾緊、斷句分組。跑完你只做判斷層:修錯字(只改聽得清楚的)、調斷句、挑 highlight。
+
+- **`--font-size` 一律帶,填跟第二步 gen_captions 一樣的數字。** 英文影片會照字級算一行多長(IMG_2135 在 66px:沒帶時 82 句有 31 句放不下被縮小、忽大忽小;帶了 94 句只縮 1 句)。中文影片不受影響,照舊。英文的 fixes 不分大小寫(`Thron pick` 也對得到 `Thron Pick`)。
 
 - **斷行只落在詞與詞之間**(jieba 斷詞,setup 會裝):Whisper 常把中文切成單字 token,舊版會斷出「自/然」「收進/去了」(三支舊專案實測 2/19/14 處 → 0)。也不會斷在「很｜自然」「講｜的時候」這種位置。
 - **停頓從聲音量,不從逐字稿算**:Whisper 中文字級時間是黏著的,停頓被算進前一個字,`w.s - prev.e` 幾乎都是 0。EDL 模式自動用 EDL 的來源影片量;門檻依每支錄音的底噪/人聲自動算。
 - **句頭被吃掉時(Whisper 時間系統性偏早)**:改成重轉剪好的 preview,再用它自己的逐字稿出字幕:
-  `$PY $H/edl_to_captions.py <preview 的逐字稿.json> 工作檔/edl.json --no-edl --audio 工作檔/preview_vN.mp4 -o captions.json --fixes fixes.json`
+  `$PY $H/edl_to_captions.py <preview 的逐字稿.json> 工作檔/edl.json --no-edl --audio 工作檔/preview_vN.mp4 -o captions.json --fixes fixes.json --font-size <同上>`
   (edl.json 一定要一起給:`--no-edl` 不拿它對時間,只拿剪接點當斷行參考。有背景音樂的素材量不到停頓,沒給剪接點會斷出跨句的行。fixes.json 裡的多字詞(人名、課名)不會被切開)
 - 斷句還是要你讀一遍調:工具保證「不切詞」,不保證「每行都是最自然的一句話」。**上字幕前把斷句清單當文字給使用者看**,讓他重斷。改斷句 / highlight 就在 captions.json 裡加 `"hl":"某詞"`(整句期間塗黃,靜態)。每次剪接改動後從頭重跑,絕不拿舊數字加減。
 
