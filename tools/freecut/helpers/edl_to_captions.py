@@ -28,7 +28,8 @@ word level. Keep a per-user dictionary in 我的剪輯偏好.md and pass it here
 Usage:
   python3 edl_to_captions.py <transcript.json> <edl.json> [-o captions.json]
       [--fixes fixes.json] [--gap 0.30] [--max-width 26]
-  python3 edl_to_captions.py <preview 自己的逐字稿.json> --no-edl [-o captions.json]
+  python3 edl_to_captions.py <preview 自己的逐字稿.json> [edl.json] --no-edl [-o captions.json]
+      (--no-edl 時 edl.json 只拿來找剪接點當斷行參考,建議一定要給)
       逐字稿是「重轉剪好的 preview」得到的,時間已經是輸出時間軸,不用 EDL 對映。
       Whisper 對原始逐字稿的字級時間常系統性偏早 0.3-0.4 秒,EDL 對映會把每段
       第一個字吃掉;重轉 preview 再用 --no-edl 就沒有這個問題(我的剪輯偏好.md)。
@@ -214,6 +215,44 @@ BREAK_AFTER = set("了嗎吧呢啊喔嘛耶啦囉唷哦呀")
 BREAK_BEFORE = ("但是", "但", "所以", "因為", "然後", "如果", "可是", "而且",
                 "還有", "接下來", "結果", "其實", "後來")
 
+# 剪接點(EDL 每段的起點,輸出時間軸)。剪點幾乎都落在句界,是最可靠的斷行位置。
+# 為什麼要它:有背景音樂的素材(直播、有墊樂的錄影)量不到停頓,舊版只能照寬度硬切,
+# 斷出前一句尾巴接下一句開頭的跨句行(2026-10-05 直播素材,21 句全部手動重斷)。
+SEAMS = []
+# 不可切開的位置(words 的索引 i = 不能斷在 words[i] 後面):fixes 裡的多字詞(人名、課名),
+# 例:兩個字的人名被 Whisper 拆成兩個 token,舊版把人名從中間斷成兩行。
+NOBREAK = set()
+
+
+def seam_between(a, b):
+    """a 後面是不是剪接點(mark_seams 事先標好)。"""
+    return bool(a.get("seam_after"))
+
+
+def mark_seams(words):
+    """每個剪接點只標一個斷點:最後一個「開頭不晚於剪點 + 0.05 秒」的字前面。
+    Whisper 字級時間偏早 0.2-0.4 秒,用寬鬆的時間窗會一次命中好幾個字界、斷錯一個字
+    (2026-10-05 實測把下一句的第一個詞斷進上一行);取「剪點前最後開頭的字」就落在剪點上。"""
+    for t in SEAMS:
+        cand = [i for i in range(len(words) - 1) if t - 0.6 <= words[i + 1]["os"] <= t + 0.05]
+        if cand:
+            words[cand[-1]]["seam_after"] = True
+
+
+def protect_fix_words(words, fixes):
+    """fixes 的鍵跟值(長度 >= 2)在字串裡出現的地方,裡面的字界都不准斷。"""
+    joined, owner = "", []
+    for i, w in enumerate(words):
+        joined += w["text"]
+        owner += [i] * len(w["text"])
+    for term in {t for kv in fixes.items() for t in kv if len(t) >= 2}:
+        start = joined.find(term)
+        while start != -1:
+            idx = owner[start:start + len(term)]
+            for i in range(idx[0], idx[-1]):
+                NOBREAK.add(i)
+            start = joined.find(term, start + 1)
+
 
 def best_break(cur, max_width, ok=None):
     """寬度到上限要斷行時,回頭在這行裡挑「最像句界」的位置,不要在講到一半硬切。
@@ -231,6 +270,8 @@ def best_break(cur, max_width, ok=None):
             continue
         gap = pause_between(cur[i], cur[i + 1])   # 原始音訊裡真實的停頓
         score = min(gap, 1.0)
+        if seam_between(cur[i], cur[i + 1]):
+            score += 0.6                           # 剪接點:幾乎一定是句界
         if cur[i]["text"] and cur[i]["text"][-1] in BREAK_AFTER:
             score += 0.25
         if any(cur[i + 1]["text"].startswith(p) for p in BREAK_BEFORE):
@@ -250,6 +291,8 @@ def group_lines(words, gap_break, max_width):
     lines, cur = [], []
 
     def ok_at(j):   # 可以在 cur[j] 後面斷嗎
+        if (base + j) in NOBREAK:
+            return False
         return allowed is None or (base + j) in allowed
 
     for w in words:
@@ -257,12 +300,14 @@ def group_lines(words, gap_break, max_width):
             gap = pause_between(cur[-1], w)      # 原始音訊裡真實的停頓
             width = sum(display_width(x["text"]) for x in cur)
             bad = cur[-1]["text"][-1:] in BAD_END or w["text"][:1] in BAD_START
-            if width >= max_width * 0.6 and gap >= gap_break and ok_at(len(cur) - 1) and not bad:
+            seam = seam_between(cur[-1], w)
+            if ((width >= max_width * 0.6 and gap >= gap_break) or (seam and width >= max_width * 0.3)) \
+                    and ok_at(len(cur) - 1) and not bad:
                 lines.append(cur)
                 base += len(cur)
                 cur = []
             elif width >= max_width:
-                bi = best_break(cur, max_width, ok_at if allowed is not None else None)
+                bi = best_break(cur, max_width, ok_at if (allowed is not None or NOBREAK) else None)
                 if bi is None and allowed is not None:
                     # 沒有好斷點:退而求其次,取這行最後一個詞界
                     bi = next((j for j in range(len(cur) - 2, -1, -1) if ok_at(j)
@@ -309,12 +354,22 @@ def main():
                                     "--no-edl 模式一定要給(就是那支 preview)")
     args = ap.parse_args()
 
+    edl_ranges = json.loads(Path(args.edl).read_text(encoding="utf-8"))["ranges"] if args.edl else None
     if args.no_edl:
         ranges = [{"start": 0.0, "end": 1e9}]
-    elif args.edl:
-        ranges = json.loads(Path(args.edl).read_text(encoding="utf-8"))["ranges"]
+    elif edl_ranges:
+        ranges = edl_ranges
     else:
         sys.exit("要給 edl.json,或用 --no-edl(逐字稿是重轉 preview 得到的)")
+    # --no-edl 也可以把 edl.json 一起給:不拿來對映時間,只拿剪接點當斷行參考
+    if edl_ranges:
+        cum = 0.0
+        for r in edl_ranges[:-1]:
+            cum += r["end"] - r["start"]
+            SEAMS.append(round(cum, 3))
+    elif args.no_edl:
+        print("  ⚠ --no-edl 沒給 edl.json:不知道剪接點在哪,有背景音樂的素材斷行會跨句。"
+              "建議:edl_to_captions.py <preview逐字稿> 工作檔/edl.json --no-edl --audio …", file=sys.stderr)
     fixes = json.loads(Path(args.fixes).read_text(encoding="utf-8")) if args.fixes else {}
 
     global PAUSES
@@ -334,6 +389,8 @@ def main():
     # single-token fixes before grouping
     for w in words:
         w["text"] = fixes.get(w["text"], w["text"])
+    protect_fix_words(words, fixes)
+    mark_seams(words)
 
     lines = group_lines(words, args.gap, args.max_width)
 

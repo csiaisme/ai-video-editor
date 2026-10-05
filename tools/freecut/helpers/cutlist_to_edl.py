@@ -127,6 +127,7 @@ def main():
     ap.add_argument("video", help="長錄影原檔")
     ap.add_argument("project", help="專案資料夾(KIT/我的影片/<專案名>)")
     ap.add_argument("--pad", type=float, default=3.0, help="切片段時前後多留幾秒(預設 3)")
+    ap.add_argument("--join", type=float, default=30.0, help="原片上相隔幾秒內的段落併成同一塊切(預設 30)")
     ap.add_argument("--no-scale", action="store_true", help="保留原解析度(預設縮到短邊 1080)")
     args = ap.parse_args()
 
@@ -152,20 +153,53 @@ def main():
     proj = Path(args.project)
     work = proj / "工作檔"
     work.mkdir(parents=True, exist_ok=True)
-    t0 = max(0.0, min(a for a, _ in ranges) - args.pad)
-    t1 = max(b for _, b in ranges) + args.pad
-    h_, m_, s_ = int(t0) // 3600, int(t0) % 3600 // 60, int(t0) % 60
-    stamp = f"{h_}時{m_:02d}分{s_:02d}秒" if h_ else f"{m_}分{s_:02d}秒"
-    excerpt = proj / f"原始影片-{stamp}起.mp4"
     vf = []
     if not args.no_scale:
         w, h = probe(args.video)
         if min(w, h) > 1080:
             vf = ["-vf", "scale=1080:-2" if w < h else "scale=-2:1080"]
-    print(f"切片段:原片 {s2tc(t0)} → {s2tc(t1)}({t1 - t0:.0f} 秒)→ {excerpt.name}")
-    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{t0:.3f}", "-to", f"{t1:.3f}", "-i",
-                    str(args.video), *vf, "-c:v", "libx264", "-crf", "16", "-preset", "fast",
-                    "-c:a", "aac", "-b:a", "192k", str(excerpt)], check=True)
+
+    # 要切哪幾塊原片:每段 ± pad,原片上離得近(< --join 秒)的併成一塊。
+    # 段落散在長錄影各處時(選段清單常從 4:27 跳到 13:27),以前會切出涵蓋全部的一大塊
+    # (2026-10-05 教室錄影實測:切了 647 秒才用到 42 秒),現在每塊各自切、再接成一支,轉稿跟 xref 都快很多。
+    wins = sorted((max(0.0, a - args.pad), b + args.pad) for a, b in ranges)
+    blocks = []
+    for a, b in wins:
+        if blocks and a - blocks[-1][1] <= args.join:
+            blocks[-1] = (blocks[-1][0], max(blocks[-1][1], b))
+        else:
+            blocks.append((a, b))
+    t0 = blocks[0][0]
+    h_, m_, s_ = int(t0) // 3600, int(t0) % 3600 // 60, int(t0) % 60
+    stamp = f"{h_}時{m_:02d}分{s_:02d}秒" if h_ else f"{m_}分{s_:02d}秒"
+    excerpt = proj / (f"原始影片-{stamp}起.mp4" if len(blocks) == 1 else f"原始影片-{stamp}起-{len(blocks)}塊接起來.mp4")
+    enc = ["-c:v", "libx264", "-crf", "16", "-preset", "fast", "-c:a", "aac", "-b:a", "192k"]
+    if len(blocks) == 1:
+        a, b = blocks[0]
+        print(f"切片段:原片 {s2tc(a)} → {s2tc(b)}({b - a:.0f} 秒)→ {excerpt.name}")
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{a:.3f}", "-to", f"{b:.3f}", "-i",
+                        str(args.video), *vf, *enc, str(excerpt)], check=True)
+    else:
+        print(f"段落散在原片各處,切 {len(blocks)} 塊再接成一支 → {excerpt.name}")
+        ins, fc = [], ""
+        for k, (a, b) in enumerate(blocks):
+            print(f"  第 {k + 1} 塊:原片 {s2tc(a)} → {s2tc(b)}({b - a:.0f} 秒)")
+            ins += ["-ss", f"{a:.3f}", "-to", f"{b:.3f}", "-i", str(args.video)]
+            fc += f"[{k}:v:0][{k}:a:0]"
+        scale = (",scale=1080:-2" if vf and vf[1].startswith("scale=1080") else ",scale=-2:1080") if vf else ""
+        fc += f"concat=n={len(blocks)}:v=1:a=1[cv][ca];[cv]setsar=1{scale}[v]"
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *ins, "-filter_complex", fc,
+                        "-map", "[v]", "-map", "[ca]", *enc, str(excerpt)], check=True)
+    # 原片秒數 → 片段秒數
+    starts, acc = [], 0.0
+    for a, b in blocks:
+        starts.append(acc)
+        acc += b - a
+    def o2e(t):
+        for (a, b), e0 in zip(blocks, starts):
+            if a - 0.5 <= t <= b + 0.5:
+                return e0 + (t - a)
+        raise ValueError(f"{t} 不在任何一塊裡")
 
     # 清單常把一段連續的話拆成兩列(例:「25:57 → 26:07 ／ 26:07 → 26:29」),
     # 前一段的終點 = 下一段的起點。分開對停頓會重疊、同一句播兩次 → 先併成一段。
@@ -180,14 +214,25 @@ def main():
     ranges = merged
 
     spans = pauses(excerpt)
-    edl_ranges, notes = [], []
+    edl_ranges, notes, flags = [], [], []
     for k, (a, b) in enumerate(ranges, 1):
-        s, ok_s = snap_start(a - t0, spans, fine)
-        e, ok_e = snap_end(b - t0, spans, fine)
+        s_, ok_s = snap_start(o2e(a), spans, fine)
+        e_, ok_e = snap_end(o2e(b), spans, fine)
+        flags.append((ok_s, ok_e))
+        edl_ranges.append({"source": "SRC", "start": round(s_, 2), "end": round(e_, 2),
+                           "beat": f"段{k}", "quote": "", "reason": ""})
+    # 原片上接在一起、但清單把順序換掉的兩段(例:鉤子挪到前面,後面那句原本緊接著鉤子):
+    # 各自去找停頓會互相吃進對方 → 兩邊都落在同一個剪點(後一段的起點)。
+    # 2026-10-05 直播素材實測:這種情況以前會報「重疊,查波形」,其實只是剪點各找各的。
+    for i, (ai, bi) in enumerate(ranges):
+        for j, (aj, bj) in enumerate(ranges):
+            if i != j and abs(bi - aj) <= 0.3 and edl_ranges[i]["end"] > edl_ranges[j]["start"] > edl_ranges[i]["start"]:
+                edl_ranges[i]["end"] = edl_ranges[j]["start"]
+                flags[i] = (flags[i][0], True)
+    for k, ((a, b), r, (ok_s, ok_e)) in enumerate(zip(ranges, edl_ranges, flags), 1):
         flag = "" if ok_s and ok_e else "(附近沒有明顯停頓,照清單秒數,一定要查波形)"
-        notes.append(f"{k}. 原片 {s2tc(a)}→{s2tc(b)} → 片段 {s:.2f}-{e:.2f}{flag}")
-        edl_ranges.append({"source": "SRC", "start": round(s, 2), "end": round(e, 2),
-                           "beat": f"段{k}", "quote": "", "reason": f"選段清單第 {args.clip} 支 位置第 {k} 段{flag}"})
+        notes.append(f"{k}. 原片 {s2tc(a)}→{s2tc(b)} → 片段 {r['start']:.2f}-{r['end']:.2f}{flag}")
+        r["reason"] = f"選段清單第 {args.clip} 支 位置第 {k} 段{flag}"
     # 保險:同一條原片時間上,後一段不能吃進前一段(會重播)
     for i, r in enumerate(edl_ranges):
         for q in edl_ranges[:i]:
@@ -200,14 +245,18 @@ def main():
     edl = {"version": 1, "sources": {"SRC": str(excerpt.resolve())}, "ranges": edl_ranges,
            "grade": "none", "overlays": [], "subtitles": None,
            "total_duration_s": round(sum(r["end"] - r["start"] for r in edl_ranges), 2),
-           "from_cutlist": {"file": str(src.resolve()), "clip": args.clip, "offset_s": t0}}
+           "from_cutlist": {"file": str(src.resolve()), "clip": args.clip, "offset_s": t0,
+                            "blocks": [{"orig_start": round(a, 2), "orig_end": round(b, 2), "excerpt_start": round(e0, 2)}
+                                       for (a, b), e0 in zip(blocks, starts)]}}
     (work / "edl.json").write_text(json.dumps(edl, ensure_ascii=False, indent=1), encoding="utf-8")
 
     keep = ["這支在講什麼", "開頭備案", "開頭字卡", "定格點", "保留停頓", "看完會改變什麼",
             "批評別人的話", "不可掃到", "客戶同意"]
     md = [f"# 選段資訊：第 {args.clip} 支 {clip['title']}", "",
           f"- 來源清單:`{src}`",
-          f"- 原片時間 = 這支片段的秒數 + {t0:.2f}", "",
+          *([f"- 原片時間 = 這支片段的秒數 + {t0:.2f}"] if len(blocks) == 1 else
+            ["- 這支片段是原片幾塊接起來的(片段秒數 → 原片):"] +
+            [f"  - 片段 {e0:.2f}-{e0 + b - a:.2f} = 原片 {s2tc(a)}-{s2tc(b)}" for (a, b), e0 in zip(blocks, starts)]), "",
           "## 位置（原片）→ 第一版剪點（片段秒數，已對停頓）", *notes, "",
           f"## 開頭鉤子\n{clip['hook']}", ""]
     for k in keep:
