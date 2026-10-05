@@ -50,9 +50,49 @@ EDGE_GUARD = 0.03   # matches render.py's 30ms audio fades
 
 ASCII_RE = re.compile(r"[A-Za-z]+$")
 
+# ★ 英文(或其他拼音文字)影片走另一條路。Whisper 在英文模式給的是一個個完整的字,
+# 不是中文模式那種「C」「la」「ude」碎片;中文的作法(字直接黏起來、ASCII 碎片合併、
+# jieba 斷詞)套在英文上會變成 "SoClaudebannedmyaccountyesterday."(IMG_2135 實測)。
+# LATIN = True:字之間加空格、不合併碎片、每個字界都能斷、句號問號優先斷行。
+# 中文影片 LATIN = False,走原本的路,輸出一個字都不變。
+LATIN = False
+CJK_LANGS = {"zh", "ja", "ko", "yue", "chinese", "japanese", "korean", "cantonese"}
+PUNCT_START = tuple(".,!?;:%)]}”’…")          # 這些開頭的 token 前面不加空格
+BREAK_BEFORE_EN = {"and", "but", "so", "because", "if", "when", "then", "or"}
+
+
+def is_latin_transcript(words, lang=None):
+    """逐字稿有記語言就照記的;沒記(舊逐字稿)就看 token:六成以上是拼音字 = 英文模式。
+    中文逐字稿裡夾的英文術語(Claude、MVP)只佔少數,不會被誤判。"""
+    if lang:
+        return lang.lower() not in CJK_LANGS
+    toks = [w["text"] for w in words if w["text"].strip()]
+    if not toks:
+        return False
+    latin = sum(1 for t in toks
+                if not any(ord(c) >= 0x2E80 for c in t) and any(c.isalpha() for c in t))
+    return latin / len(toks) >= 0.6
+
+
+def join_tokens(texts):
+    """中文:直接黏起來(原本的行為)。英文:字之間加空格,標點前面不加。"""
+    if not LATIN:
+        return "".join(texts)
+    out = ""
+    for t in texts:
+        if out and not t.startswith(PUNCT_START):
+            out += " "
+        out += t
+    return out
+
 
 def display_width(s):
     return sum(2 if ord(c) > 0x2E80 else 1 for c in s)
+
+
+def line_width(tokens):
+    """一行字幕的顯示寬度。英文模式要把字間空格算進去。"""
+    return display_width(join_tokens([x["text"] for x in tokens]))
 
 
 def word_boundaries(words):
@@ -135,7 +175,11 @@ def pause_between(a, b):
     """a、b 是相鄰的兩個字;回傳它們之間真實的停頓秒數。"""
     if PAUSES is None:
         return max(0.0, b["s"] - a["e"])
-    lo, hi = a["s"], b["s"]
+    # 中文 Whisper 把停頓算進「前一個字」的長度,所以量 [前字開始, 後字開始]。
+    # 英文 Whisper 剛好相反:停頓被算進「後一個字」的開頭(IMG_2135 實測:"chat, ... I would"
+    # 那 1.4 秒停頓落在 "I" 的 95.26-96.72 裡),照中文的窗會晚一個字 → 斷出單獨一行 "I"。
+    # 英文改量 [前字結束, 後字結束],把被後字吞進去的停頓算回這兩個字之間。
+    lo, hi = (a["e"], b["e"]) if LATIN else (a["s"], b["s"])
     return sum(max(0.0, min(e, hi) - max(s, lo)) for s, e in PAUSES if s < hi and e > lo)
 
 
@@ -243,6 +287,9 @@ def protect_fix_words(words, fixes):
     """fixes 的鍵跟值(長度 >= 2)在字串裡出現的地方,裡面的字界都不准斷。"""
     joined, owner = "", []
     for i, w in enumerate(words):
+        if LATIN and joined and not w["text"].startswith(PUNCT_START):
+            joined += " "          # 英文模式字間有空格,fixes 的多字詞("for no reason")才對得到
+            owner.append(i)
         joined += w["text"]
         owner += [i] * len(w["text"])
     for term in {t for kv in fixes.items() for t in kv if len(t) >= 2}:
@@ -338,6 +385,91 @@ def group_lines(words, gap_break, max_width):
     return lines
 
 
+# ---- 英文斷行(LATIN 模式才用;中文完全走上面的 group_lines)----
+# 上面那套是為中文寫的:貪婪填滿、再回頭找停頓/語氣詞。套在英文上會斷出
+# "means. And then I"、"to Claude. If"、行尾停在 "my"(2026-10-05 實測)。
+# 英文最可靠的斷點是句號:Whisper 英文 token 自帶標點("yesterday.")。所以:
+#   1. 先切成句子(句號問號驚嘆號、剪接點、≥0.5 秒的真實停頓)
+#   2. 塞得下就一句一行;塞不下就把那一句切成「最平均、斷點最自然」的幾行:
+#      優先切在逗號、and/but/so 前面、真實停頓;行尾不准停在 my / the / to 這種字。
+BAD_END_EN = {"a", "an", "the", "to", "of", "my", "your", "our", "their", "his", "her",
+              "its", "in", "on", "at", "for", "with", "from", "by", "and", "but", "or",
+              "so", "i", "we", "you", "they", "he", "she", "that", "this", "if", "because"}
+
+
+def _bare(t):
+    return t.lower().strip(".,!?;:\"“”()")
+
+
+def _split_sentence_latin(sent, max_width):
+    """一句太長時,用動態規劃找總代價最低的切法。
+    每多一行 +1;每行越空 +(空的比例)²;斷點加分:逗號 0.6、and/but/so 前 0.35、停頓最多 0.6;
+    行尾是 my/the/to 這種字 -1.5(寧可多一行也不要)。fixes 的多字詞中間不能切。"""
+    n = len(sent)
+    if n <= 1 or line_width(sent) <= max_width:
+        return [sent]
+
+    def bonus(k):   # 在 sent[k] 後面斷
+        a, b = sent[k], sent[k + 1]
+        s = min(pause_between(a, b), 0.6)
+        if a["text"][-1:] in ",;:":
+            s += 0.6
+        if _bare(b["text"]) in BREAK_BEFORE_EN:
+            s += 0.35
+        if _bare(a["text"]) in BAD_END_EN:
+            s -= 1.5
+        return s
+
+    INF = float("inf")
+    dp = [(0.0, -1)] + [(INF, -1)] * n        # dp[j] = (sent[:j] 的最低代價, 上一個斷點)
+    for j in range(1, n + 1):
+        for i in range(j - 1, -1, -1):
+            w = line_width(sent[i:j])
+            if w > max_width and j - i > 1:
+                break                          # 再往前只會更寬
+            if dp[i][0] == INF or (i > 0 and sent[i - 1].get("_i") in NOBREAK):
+                continue
+            slack = (max_width - min(w, max_width)) / max_width
+            cost = dp[i][0] + 1.0 + slack * slack - (bonus(i - 1) if i > 0 else 0.0)
+            if cost < dp[j][0]:
+                dp[j] = (cost, i)
+    if dp[n][0] == INF:                        # fixes 多字詞比一行還寬:整句一行,交給 gen_captions 縮字級
+        return [sent]
+    out, j = [], n
+    while j > 0:
+        i = dp[j][1]
+        out.append(sent[i:j])
+        j = i
+    return out[::-1]
+
+
+def group_lines_latin(words, gap_break, max_width):
+    for k, w in enumerate(words):
+        w["_i"] = k                            # 全域索引,NOBREAK 用
+    sents, cur = [], []
+    for k, w in enumerate(words):
+        cur.append(w)
+        nxt = words[k + 1] if k + 1 < len(words) else None
+        if nxt is None:
+            break
+        # 不看剪接點:mark_seams 為了中文 Whisper 時間偏早,會標在剪點前一個字,英文會因此
+        # 斷出 "know what that / means."。英文的句界本來就有標點,剪點加不了資訊。
+        # 停頓斷句要這行已經有 4 成寬:不然 "So" / "Boris," 這種單字會自己一行閃一下就沒
+        # (中文那套也有同樣的防呆,是 6 成)。句號問號照斷,不受這個限制。
+        # 行尾也不准是 because / the / my(講話時停在這種字很正常,但讀起來像斷掉)
+        long_enough = line_width(cur) >= max_width * 0.4 and _bare(w["text"]) not in BAD_END_EN
+        if k not in NOBREAK and (w["text"][-1:] in ".?!"
+                                 or (long_enough and pause_between(w, nxt) >= max(gap_break, 0.5))):
+            sents.append(cur)
+            cur = []
+    if cur:
+        sents.append(cur)
+    lines = []
+    for s in sents:
+        lines.extend(_split_sentence_latin(s, max_width))
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("transcript")
@@ -384,19 +516,32 @@ def main():
         print("  ⚠ 沒給 --audio,停頓改用逐字稿時間(Whisper 中文幾乎量不到停頓,斷行會偏硬)",
               file=sys.stderr)
 
-    words = merge_latin(map_to_output(load_words(args.transcript), ranges))
+    global LATIN
+    raw = load_words(args.transcript)
+    tdata = json.loads(Path(args.transcript).read_text(encoding="utf-8"))
+    LATIN = is_latin_transcript(raw, tdata.get("language") if isinstance(tdata, dict) else None)
+    if LATIN:
+        print("  英文模式:字間加空格、不合併英文碎片、句號問號優先斷行", file=sys.stderr)
+    kept = map_to_output(raw, ranges)
+    words = kept if LATIN else merge_latin(kept)   # 碎片合併只給中文模式(英文會把整句黏成一個字)
 
     # single-token fixes before grouping
     for w in words:
-        w["text"] = fixes.get(w["text"], w["text"])
+        t = w["text"]
+        if t in fixes:
+            w["text"] = fixes[t]
+        elif LATIN:   # 英文 token 自帶標點:"Boars," 也要對到 fixes 的 "Boars"
+            core = t.rstrip(".,!?;:")
+            if core != t and core in fixes:
+                w["text"] = fixes[core] + t[len(core):]
     protect_fix_words(words, fixes)
     mark_seams(words)
 
-    lines = group_lines(words, args.gap, args.max_width)
+    lines = (group_lines_latin if LATIN else group_lines)(words, args.gap, args.max_width)
 
     caps = []
     for ln in lines:
-        text = "".join(x["text"] for x in ln)
+        text = join_tokens([x["text"] for x in ln])
         for wrong, right in fixes.items():      # multi-token fixes on joined text
             text = text.replace(wrong, right)
         caps.append({

@@ -227,6 +227,7 @@ def transcribe_whisper(
     Returns the normalized {"words": [...]} shape with speaker_id="speaker_0".
     """
     word_entries: list[dict] = []
+    lang_used = language   # 指定了就是指定的;沒指定就換成 Whisper 自己判斷的(下面填)
     _hf_offline_if_cached(model)
 
     if _mlx_whisper_available():
@@ -239,6 +240,7 @@ def transcribe_whisper(
             language=language,
             word_timestamps=True,
         )
+        lang_used = result.get("language") or language
         for seg in result.get("segments", []):
             for w in seg.get("words", []) or []:
                 text = (w.get("word") or "").strip()
@@ -263,6 +265,7 @@ def transcribe_whisper(
         # 迭代 segments 才浮出來,所以整段迭代都要包住;結果先收進區域 list,
         # 成功才 extend,失敗那次的半截結果不會混進來。
         def _run_faster_whisper(device: str, compute_type: str) -> list[dict]:
+            nonlocal lang_used
             wm = WhisperModel(model, device=device, compute_type=compute_type)
             segments, _info = wm.transcribe(
                 str(audio_path),
@@ -270,6 +273,7 @@ def transcribe_whisper(
                 word_timestamps=True,
                 vad_filter=False,
             )
+            lang_used = getattr(_info, "language", None) or language
             entries: list[dict] = []
             for seg in segments:
                 for w in (seg.words or []):
@@ -309,14 +313,79 @@ def transcribe_whisper(
         )
 
     # 簡轉繁是「這個 backend 用的模型碰巧輸出簡體」的共用問題,不是只有 XXL 會遇到 —
-    # pip 版 faster-whisper 對 zh 預設也常吐簡體。要求 language=="zh" 才轉,才不會
-    # 誤動到其他語言;所有子分支(mlx / faster-whisper)都要走到這裡才 return,
+    # pip 版 faster-whisper 對 zh 預設也常吐簡體。語言是 zh 才轉,才不會誤動到其他語言;
+    # 所有子分支(mlx / faster-whisper)都要走到這裡才 return,
     # 只有 whisper_xxl 分支是自己內部處理後 early return(見上面),所以蓋得到全部。
-    if language == "zh":
+    # 看 lang_used 而不是 language:沒帶 --language 讓 Whisper 自己判斷出 zh 時也要轉,
+    # 不然自動偵測的中文影片會吐簡體。
+    if lang_used == "zh":
         for w in word_entries:
             w["text"] = _to_traditional(w["text"])
 
-    return {"words": _interleave_spacing(word_entries)}
+    # 把實際用的語言記進逐字稿:edl_to_captions(英文模式)、verify_cut(重聽語言)都讀它
+    return {"words": _interleave_spacing(word_entries), "language": lang_used}
+
+
+# ---------------------------------------------------------------------------
+# 品質防呆:語言不符 / 鬼打牆
+# ---------------------------------------------------------------------------
+# ★ IMG_2135(2026-07-30):英文影片被用 --language zh 硬轉。Whisper 被指定語言時不會說
+#   「這其實是英文」,而是把英文翻成中文硬塞,29-88 秒(將近一半)還鬼打牆:重複
+#   「我自己寫下我自己的 app」+ 兩百多個 0 秒長的 "app"。exit 0、看起來像正常逐字稿,
+#   下游全部建在幻覺上。下面兩道檢查都只印警告、不擋(中英夾雜的中文片開頭可能是英文,
+#   擋了反而誤傷);AI 看到警告照指示重跑就好。
+
+def detect_language_quick(audio_path: Path, model: str = DEFAULT_WHISPER_MODEL,
+                          seconds: int = 30) -> str | None:
+    """只聽前 N 秒,回報 Whisper 自己判斷的語言(不指定語言跑一次)。抓不到就回 None。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        clip = Path(tmp) / "head.wav"
+        try:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(audio_path),
+                            "-t", str(seconds), "-ac", "1", "-ar", "16000", str(clip)], check=True)
+            _hf_offline_if_cached(model)
+            if _mlx_whisper_available():
+                import mlx_whisper
+                r = mlx_whisper.transcribe(str(clip), path_or_hf_repo=MLX_REPOS.get(model, model),
+                                           language=None, word_timestamps=False)
+                return r.get("language")
+            if _faster_whisper_available():
+                from faster_whisper import WhisperModel
+                # transcribe 是 lazy 的:語言判斷完就會回 info,不用真的解碼 segments
+                _segs, info = WhisperModel(model, device="cpu", compute_type="int8").transcribe(str(clip))
+                return getattr(info, "language", None)
+        except Exception as e:
+            print(f"  (語言檢查跳過:{e.__class__.__name__})", file=sys.stderr)
+    return None
+
+
+def loop_warnings(words: list[dict], max_period: int = 8) -> list[str]:
+    """找鬼打牆:同一段字(1-8 個 token)連續重複 4 次以上、而且蓋過 12 個 token 以上;
+    或是兩成以上的字長度是 0 秒。正常講話不會這樣,Whisper 幻覺才會。"""
+    toks = [((w.get("text") or "").strip().lower(), w) for w in words if w.get("type") == "word"]
+    out, k, n = [], 0, len(toks)
+    while k < n:
+        best = None
+        for p in range(1, max_period + 1):
+            m = k
+            while m + p < n and toks[m][0] == toks[m + p][0]:
+                m += 1
+            span = m - k + p                  # 這段重複蓋過幾個 token
+            if span >= 12 and span / p >= 4 and (best is None or span > best[0]):
+                best = (span, p)
+        if best:
+            span, p = best
+            a, b = toks[k][1], toks[min(k + span, n) - 1][1]
+            phrase = " ".join(t for t, _ in toks[k:k + p])
+            out.append(f"「{phrase}」連續重複約 {span // p} 次"
+                       f"({float(a['start']):.1f}–{float(b['end']):.1f} 秒)")
+            k += span
+        else:
+            k += 1
+    zero = sum(1 for _, w in toks if float(w["end"]) - float(w["start"]) < 0.005)
+    if toks and zero / len(toks) >= 0.2:
+        out.append(f"{zero}/{len(toks)} 個字長度是 0 秒")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +725,9 @@ def transcribe_one(
         size_mb = audio.stat().st_size / (1024 * 1024)
         if verbose:
             print(f"  {backend}: {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
+        # 指定了語言才檢查(沒指定 = Whisper 本來就會自己判斷)
+        heard = detect_language_quick(audio, whisper_model) \
+            if backend == "whisper" and language else None
         payload = _run_backend(
             backend=backend,
             audio=audio,
@@ -676,6 +748,24 @@ def transcribe_one(
             f"把上面的錯誤訊息整段回報)。沒有寫出逐字稿檔。"
         )
 
+    warnings: list[str] = []
+    if isinstance(payload, dict) and "words" in payload:
+        payload.setdefault("language", language)   # 沒回報語言的 backend:至少記下指定的
+        if heard and language and heard.lower() != language.lower():
+            payload["language_detected"] = heard
+            warnings.append(
+                f"語言不符:你指定 --language {language},但前 30 秒聽起來是「{heard}」。\n"
+                f"      整支都是 {heard} 的話,這份逐字稿多半是硬翻/幻覺 → 刪掉這份 JSON,"
+                f"拿掉 --language 重跑。\n"
+                f"      只有開頭是 {heard}(中英夾雜的中文片)就不用管。")
+        loops = loop_warnings(payload["words"])
+        if loops:
+            warnings.append("疑似鬼打牆(Whisper 幻覺):" + ";".join(loops) +
+                            "\n      這幾段的逐字稿不可信,剪之前先用 split_blobs 看真實聲音;"
+                            "大段都是的話,多半是語言指定錯了。")
+        if warnings:
+            payload["warnings"] = warnings
+
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     # Always drop a compact companion the reading agent should use instead of
     # the fat JSON (see write_compact). Cheap to produce, big token saver.
@@ -693,6 +783,11 @@ def transcribe_one(
             print(f"  compact: {compact_path.name}  ← read this one, not the JSON")
         if isinstance(payload, dict) and "words" in payload:
             print(f"    words: {len(payload['words'])}")
+            if payload.get("language"):
+                print(f"    language: {payload['language']}")
+    # 警告不管 verbose 都要印,而且印在最後 — AI 通常只看輸出的尾巴
+    for w in warnings:
+        print(f"  ⚠ {w}", flush=True)
 
     return out_path
 

@@ -162,6 +162,10 @@ $PY $H/transcribe.py <影片> --backend whisper --language zh --edit-dir <專案
 $PY $H/xref_silence.py <影片> <專案>/工作檔/transcripts/<名稱>.json
 ```
 
+- **transcribe 最後印的 `⚠` 一定要處理,不要略過。**
+  - `語言不符`:你指定了 `--language zh`,但前 30 秒聽起來是別的語言。**整支都是那個語言**(例:英文口播)→ 刪掉那份 JSON,**拿掉 `--language`** 重跑。被硬指定成中文的英文片會被翻成假中文、還會鬼打牆(IMG_2135 實測:將近一半是重複的「我自己寫下我自己的 app」)。只有開頭是英文的中英夾雜中文片 → 不用管。
+  - `疑似鬼打牆`:那幾秒的逐字稿是幻覺,剪之前先用 split_blobs 看真實聲音。
+  - **英文影片之後的工具都不用另外設定:** 逐字稿會記下語言,`edl_to_captions` 自動切英文模式(字間空格、一句一行、長句切在逗號或 and/but 前),`verify_cut` 自動用英文重聽。
 - **讀逐字稿讀 `transcripts/<名稱>.words.txt`(compact 版),不要讀那份肥 JSON。** transcribe 會順手產這份一行一字的檔(`idx  start-end  字`),token 只有 JSON 的約 1/6。剪接、對時間、規劃字幕要的都在這份。
 - **一次把 xref 的所有旗標查完,不要邊被使用者嫌邊查。** 五類旗標 MERGE / LONG / **GAP** / **FILLER** / **SNAP** 每個都跑 `$PY $H/split_blobs.py <影片> <start> <end>`,在提剪接案之前就把真正的語音區塊看清楚。MERGE 區是 Whisper 出錯的地方(重複字被併成一個 token、贅字被吃進字的時間裡);實測**幾乎每個接縫 bug 都落在這些旗標區**。絕不在旗標區只憑逐字稿時間做細剪。這關先做完,後面才不會來回。
 - **FILLER 旗標 = 這個「字」可能根本不是字,是 um/呃。** Whisper 會把一個 0.28 秒的

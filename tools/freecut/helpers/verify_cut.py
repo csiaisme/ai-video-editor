@@ -160,7 +160,8 @@ def main() -> None:
     ap.add_argument("transcript", type=Path, help="source (whole-video) transcript JSON")
     ap.add_argument("edl", type=Path)
     ap.add_argument("--fixes", type=Path, default=None, help="錯字字典 JSON to normalize both sides")
-    ap.add_argument("--language", default="zh")
+    ap.add_argument("--language", default=None,
+                    help="重聽 preview 用的語言。預設照逐字稿記的;舊逐字稿沒記就看內容(中文→zh、英文→自動偵測)")
     ap.add_argument("--min-block", type=int, default=4,
                     help="min diverging chars to flag (smaller = pickier)")
     args = ap.parse_args()
@@ -170,7 +171,21 @@ def main() -> None:
             sys.exit(f"not found: {p}")
     fixes = json.loads(args.fixes.read_text(encoding="utf-8")) if args.fixes and args.fixes.exists() else None
 
-    rc = verify(args.preview, args.transcript, args.edl, fixes, args.language, args.min_block)
+    # ★ 以前預設寫死 zh:英文影片重聽出來整段是中文亂碼,對稿結果毫無意義、而且不報錯
+    #   (IMG_2135 實測)。改成跟著逐字稿的語言走。
+    language = args.language
+    if language is None:
+        t = json.loads(args.transcript.read_text(encoding="utf-8"))
+        language = t.get("language") if isinstance(t, dict) else None
+        if language is None:   # 舊逐字稿沒記語言:中文照舊用 zh,拼音字為主就讓 Whisper 自己判斷
+            ws = t["words"] if isinstance(t, dict) else t
+            toks = [(w.get("text") or "").strip() for w in ws if (w.get("text") or "").strip()]
+            latin = sum(1 for x in toks if not any(ord(c) >= 0x2E80 for c in x)
+                        and any(c.isalpha() for c in x))
+            language = None if toks and latin / len(toks) >= 0.6 else "zh"
+        print(f"  重聽語言:{language or '自動偵測'}(照逐字稿判斷;要強制就加 --language)")
+
+    rc = verify(args.preview, args.transcript, args.edl, fixes, language, args.min_block)
     sys.exit(rc)
 
 
