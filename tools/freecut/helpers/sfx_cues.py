@@ -18,7 +18,7 @@ sfx_cues.py — 音效時間表(sfx_cues.json)+ 第 7 步混音。兩行字幕�
     python3 sfx_cues.py list  <sfx_cues.json>        列出全部 + 檢查(同一個音效 15 秒內重複、總數)
     python3 sfx_cues.py mix   <render_final.mp4> <sfx_cues.json> <成品.mp4> [--bgm 檔 --bgm-vol 0.2 --duck-db 4.5]
         一條 ffmpeg 把音效 + BGM 混進去(影片流複製不重壓),做法同 SKILL.md 第 7 步
-        (amix normalize=0 → alimiter level=disabled),混完印峰值。
+        (amix normalize=0 → alimiter level=disabled:latency=1),混完印峰值。
 """
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ HERE = Path(__file__).resolve().parent
 KIT = HERE.parents[2]                                   # tools/freecut/helpers → KIT
 SFX_ROOT = KIT / "素材庫" / "預設包" / "音效"
 SAME_SFX_GAP = 15.0                                     # 同一個音效 15 秒內不重複(兩行字幕 Round 2 規則)
+VOICE_LUFS = -14.0                                      # 人聲目標響度(render.py 的 loudnorm 也是 -14;對照表的音效 volume 都以這個為基準)
 DUCK_DB = 4.5                                           # 音效響的時候 BGM 往下壓幾 dB(來源建議 3-6dB;Jake 2026-10-07 同意加)
 CAP_HINT = "3-6"                                        # 對照表的每支音效點數(Jake 2026-10-07 定:只配在看得到的動作上)
 
@@ -116,11 +117,34 @@ def _duck_expr(cues: list[dict], bgm_vol: float, duck_db: float) -> str:
     return f"{bgm_vol}*" + "*".join(parts)
 
 
+def lufs(path) -> float | None:
+    """整支的整合響度(ebur128 的 I)。量不到回傳 None。"""
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path), "-vn", "-af", "ebur128", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", r.stderr)
+    return float(m[-1]) if m else None
+
+
+def voice_gain(render_mp4, target: float = VOICE_LUFS) -> tuple[float, str]:
+    """hyperframes render 出來的人聲比 preview 小一截(0.8.137 實測整支固定 -1.8dB,不是特效造成的),
+    混音前把人聲補回 target。只補 -3~+6dB 之間,超出代表素材本身有問題,不亂拉、印出來。"""
+    i = lufs(render_mp4)
+    if i is None or i < -70:
+        return 0.0, "人聲響度量不到(沒有聲音?),不補"
+    g = round(target - i, 1)
+    if abs(g) < 0.3:
+        return 0.0, f"人聲 {i} LUFS,已經在 {target} 附近,不補"
+    if not -3.0 <= g <= 6.0:
+        return 0.0, f"⚠ 人聲 {i} LUFS 跟 {target} 差 {g}dB,超出自動補償範圍,不補 — 先查 render 的聲音"
+    return g, f"人聲 {i} LUFS → 補 {g:+}dB 到 {target}"
+
+
 def mix_args(render_mp4, cues: list[dict], out_mp4, bgm=None, bgm_vol: float = 0.2, duration: float | None = None,
-             duck_db: float = DUCK_DB) -> list[str]:
-    """回傳 ffmpeg 參數 list(跨平台直接丟 subprocess,不經過 shell 引號)。"""
+             duck_db: float = DUCK_DB, voice_db: float = 0.0) -> list[str]:
+    """回傳 ffmpeg 參數 list(跨平台直接丟 subprocess,不經過 shell 引號)。voice_db = 人聲先補幾 dB(見 voice_gain)。"""
     args = ["ffmpeg", "-y", "-i", str(render_mp4)]
-    fl, labels = ["[0:a]aformat=channel_layouts=stereo:sample_rates=48000[v0]"], ["[v0]"]
+    vg = f",volume={voice_db}dB" if voice_db else ""
+    fl, labels = [f"[0:a]aformat=channel_layouts=stereo:sample_rates=48000{vg}[v0]"], ["[v0]"]
     for k, c in enumerate(cues, 1):
         args += ["-i", _resolve(c)]
         ms = int(round(c["at"] * 1000))
@@ -138,7 +162,7 @@ def mix_args(render_mp4, cues: list[dict], out_mp4, bgm=None, bgm_vol: float = 0
                   f"volume='{_duck_expr(cues, bgm_vol, duck_db)}':eval=frame[bgm]")
         labels.append("[bgm]")
     fl.append(f"{''.join(labels)}amix=inputs={len(labels)}:normalize=0[mix];"
-              f"[mix]alimiter=limit=0.89:level=disabled[aout]")
+              f"[mix]alimiter=limit=0.87:level=disabled:latency=1,volume=0.96[aout]")   # latency=1:多軌混時開頭不會爆一聲「啪」(選段demo 實測)
     return args + ["-filter_complex", ";".join(fl), "-map", "0:v", "-map", "[aout]",
                    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out_mp4)]
 
@@ -162,9 +186,12 @@ def main() -> int:
     a2.add_argument("--bgm")
     a2.add_argument("--bgm-vol", type=float, default=0.2)
     a2.add_argument("--duck-db", type=float, default=DUCK_DB, help=f"音效響時 BGM 壓幾 dB(預設 {DUCK_DB},0 = 不壓)")
+    a2.add_argument("--voice-lufs", type=float, default=VOICE_LUFS,
+                    help=f"人聲補回的目標響度(預設 {VOICE_LUFS});--no-voice-fix 不補")
+    a2.add_argument("--no-voice-fix", action="store_true")
     a = ap.parse_args()
 
-    cues = load(a.cues)
+    cues = load(a.cues) if a.cues != "-" else []
     if a.cmd == "list":
         for c in cues:
             tr = f" 剪 {c['trim']}s" if c.get("trim") else ""
@@ -178,13 +205,15 @@ def main() -> int:
         sys.exit("找不到 ffmpeg(先 source tools/env.sh)")
     for w in check(cues):
         print(w)
-    args = mix_args(a.render, cues, a.out, bgm=a.bgm, bgm_vol=a.bgm_vol, duck_db=a.duck_db)
+    vdb, vmsg = (0.0, "人聲不補(--no-voice-fix)") if a.no_voice_fix else voice_gain(a.render, a.voice_lufs)
+    print(vmsg)
+    args = mix_args(a.render, cues, a.out, bgm=a.bgm, bgm_vol=a.bgm_vol, duck_db=a.duck_db, voice_db=vdb)
     r = subprocess.run(args, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stderr[-2000:])
         return r.returncode
     print(f"done: {a.out}({len(cues)} 個音效{' + BGM' if a.bgm else ''},長度 {_duration(a.out):.2f}s,"
-          f"峰值 {_peak(a.out)} dB — 要 < -1)")
+          f"峰值 {_peak(a.out)} dB — 要 < -1,響度 {lufs(a.out)} LUFS)")
     return 0
 
 

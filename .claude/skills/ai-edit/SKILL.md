@@ -410,12 +410,13 @@ GSAP 疊層,跟字幕同一個 composition。**提案裡用到特效工具箱的
 - **同一支口播換段落**:只用會遮住畫面的 `shutter` / `color-blocks` / `blinds`(短又糊的 `blur-ripple` / `glitch` / `whip` 次之)。push、iris 會同時看到兩個她(實測),工具會印 WARN。
 - 一支 2-3 個,放在真的換話題的地方,不是每個剪點都放。
 - **一定要讀它印出的紀錄**:`SHIFT` / `REMOVE` / `MOVE` / `FADE` 是它自動做的;`HIDDEN` = 特效被 b-roll/字卡蓋住,自己決定搬不搬;`MANUAL` 要手改。字幕(含兩行字幕、螢光筆)永遠在轉場上面、不動。
-- 音效:回傳的 `cues` 用 `sfx_cues.save("sfx_cues.json", "轉場", cues)` 存,跟兩行字幕同一份,**一樣算在整支音效額度裡**。
+- 音效:回傳的 `cues` 用 `sfx_cues.save("sfx_cues.json", "轉場", cues)` 存,跟兩行字幕同一份,**一樣算在整支音效額度裡**。額度不夠時 spec 加 `back_sfx=False`(回程不配)或 `sfx=False`。
 - render 前跑 `$PY $H/transitions.py check <captions 資料夾>`,不是 OK 不准 render。加完 snapshot:轉場前、正中間、轉場後各一格拼一張給他看(card-flip 正中間全黑是正常的,挑 1/3 的位置截)。
 
 ### 5.4 疊加效果(IG 追蹤卡、通知、閃光、定格、漏光、攝影機 HUD)
 
 用 `$H/overlays.py`:creative.py 裡**先 `apply_transitions`、再 `apply_overlays(s, [...], base_dir=".")`**,一支的疊加一次給。配方、參數、什麼時候用見 `tools/特效工具箱.md` 第 10 點(`$PY $H/overlays.py recipes`)。
+- **IG 追蹤卡位置要看這支的畫面**:預設 `top=1130`(講者下方的桌面區)。那裡有示範物(假人頭、產品、手在操作)就 snapshot 找講者臉跟示範物之間的空位改 `top`(高慧雯測試:假人頭在下半,改 `top=560`)。蓋到示範物比蓋到牆嚴重。
 - **IG 追蹤卡(結尾 CTA)**:帳號、顯示名稱、頭像**只問一次**,記進 `我的剪輯偏好.md`「特效／品牌」的 `IG 帳號:` / `IG 顯示名稱:` / `IG 頭像:` 三行(頭像先複製進 `素材庫/圖片/`),工具自己讀。手指點擊預設 `hand-ripple`(替代款 `tap="circle"` / `"hand"` / `"none"`)。不放 Instagram 的 logo / 字樣(商標)。
 - 一定要讀它印的紀錄:`SHIFT`(落在轉場裡,整個往後搬)、`HIDDEN`(被 b-roll/字卡蓋住)、`WARN`(全畫面效果同一拍重疊、追蹤卡不在片尾)。
 - 音效:`sfx_cues.save("sfx_cues.json", "疊加卡片", cues)`,**算在整支音效額度裡**。漏光、攝影機 HUD 預設沒音效。
@@ -525,7 +526,7 @@ ffmpeg -y -i <專案>/工作檔/render_final.mp4 -i sfx1.mp3 -i bgm.mp3 -filter_
 
 **有 `工作檔/captions/sfx_cues.json`(兩行字幕、轉場會自動寫)時,直接用 `$PY $H/sfx_cues.py mix 工作檔/render_final.mp4 工作檔/captions/sfx_cues.json <專案>/成品.mp4 --bgm <bgm.mp3> --bgm-vol <音量>`** — 同上面那條 filter_complex(音效照時間表排、hit 這種長尾巴的自動剪短、BGM 蓋滿全片、**每個音效響的時候 BGM 自動往下壓 4.5dB 再回來**(`--duck-db 0` 關掉)、limiter `level=disabled`),混完印長度跟峰值。你自己另外配的音效加進那份 JSON(`"from": "手動"`),不要另寫一條指令。先跑 `$PY $H/sfx_cues.py list <sfx_cues.json>` 看總數:超過 6 個就刪(先刪不在動作上的)。
 
-**只有 BGM、沒有音效時,直接用 `bash $H/finalize.sh <專案>/工作檔/render_final.mp4 <bgm.mp3> <專案>/成品.mp4 [音量]`** — 它自動循環 BGM 蓋滿全片、進出 fade、限幅,影片流複製不重壓(~1 秒)。有音效要疊才用上面的完整 filter_complex。**完全沒有 BGM 也沒有音效時,成品就是 `cp 工作檔/render_final.mp4 成品.mp4`** — 三條路殊途同歸:成品.mp4 只從 render_final.mp4 產生、只有一份、在專案根目錄。**每次重 render 後都要重跑混音**(混音只存在輸出檔,不在 hyperframes 專案裡)。
+**只有 BGM、沒有音效時,直接用 `bash $H/finalize.sh <專案>/工作檔/render_final.mp4 <bgm.mp3> <專案>/成品.mp4 [音量]`** — 它自動循環 BGM 蓋滿全片、進出 fade、限幅,影片流複製不重壓(~1 秒)。有音效要疊才用上面的完整 filter_complex。**完全沒有 BGM 也沒有音效時,成品用 `$PY $H/sfx_cues.py mix 工作檔/render_final.mp4 - 成品.mp4`**(不要直接 cp:hyperframes render 出來的人聲比 preview 小約 1.8dB,三條路都會量一次、補回 -14 LUFS,補了多少會印出來) — 三條路殊途同歸:成品.mp4 只從 render_final.mp4 產生、只有一份、在專案根目錄。**每次重 render 後都要重跑混音**(混音只存在輸出檔,不在 hyperframes 專案裡)。
 
 背景音樂音量約 0.15-0.25(壓在人聲下面);短的曲子用 `-stream_loop` 循環。音效時間點用輸出時間軸的字詞秒數。用完問使用者要不要存進素材庫(見上面建議循環)。
 

@@ -271,7 +271,8 @@ def _build_one(i, spec, src):
     hold = float(spec.get("hold") or 0)
     tr = 40 + i * 10
     A, M, C = f"#{u}-a", f"#{u}-m", f"#{u}-c"
-    parts, js, legs, covered, cues = [], [], [(T, T + D)], [], [_sfx_cue(rec, T, D, u)]
+    # sfx=False 進場不配音效;back_sfx=False 回程不配(整支音效額度不夠時用,高慧雯測試實測需要)
+    parts, js, legs, covered, cues = [], [], [(T, T + D)], [], ([_sfx_cue(rec, T, D, u)] if spec.get("sfx", True) is not False else [])
 
     # 場景 A:剪接點前的「近乎定格」副本(rate 0.1 → D 秒只吃掉 0.1*D 秒的畫面,結束在 T 前 0.05 秒)
     ms = max(0.0, T - 0.05 - 0.1 * D)
@@ -296,7 +297,8 @@ def _build_one(i, spec, src):
         parts.append(f'<div id="{u}-c" class="tx-scene">{_video(f"{u}-vc", src, T2, Db, T2, tr + 2)}</div>')
         legs.append((T2, T2 + Db))
         covered.append((T + D, T2))
-        cues.append(_sfx_cue(back, T2, Db, u))
+        if spec.get("back_sfx", True) is not False:
+            cues.append(_sfx_cue(back, T2, Db, u))
         total_end = T2 + Db
         if RECIPES[back][6]:
             parts.insert(0, _timed_div(f"{u}-bk2", T2, Db, "position:absolute; inset:0; background:#000;", tr + 8))
@@ -499,7 +501,8 @@ def _creative_clips(html):
 
 # ------------------------------------------------------------------ public API
 def apply_transitions(html, specs, src=None, base_dir="."):
-    """specs: [dict(at, recipe, into="video"|"broll:<檔>"|"card:<小標|大字>", hold, back, dur, back_dur)]
+    """specs: [dict(at, recipe, into="video"|"broll:<檔>"|"card:<小標|大字>", hold, back, dur, back_dur, sfx, back_sfx)]
+    sfx / back_sfx = False:進場 / 回程不配音效(整支音效額度不夠時)。
     src = 口播主畫面檔名(預設讀 #a-roll 的 src);base_dir = index.html 所在資料夾(找 b-roll 用)。
     回傳 (html, report_lines, sfx_cues)。report 第一段是忙碌區間。cues 用 sfx_cues.save(..., "轉場", cues) 存。"""
     global W, H, BASE_DIR

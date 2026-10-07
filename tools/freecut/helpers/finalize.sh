@@ -36,9 +36,15 @@ DUR=$(ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint
 # 的 0-byte 空殼,執行失敗配上 set -e 整支中斷(學員實測)。awk 到處都有。
 FADE_OUT_START=$(awk -v d="$DUR" 'BEGIN { s = d - 1.6; if (s < 0) s = 0; print s }')
 
+# hyperframes render 出來的人聲比 preview 小一截(0.8.137 實測整支固定 -1.8dB)→ 量一次補回 -14 LUFS。
+# 只補 -3~+6dB,超出就不動(代表素材本身有問題)。邏輯同 sfx_cues.py 的 voice_gain。
+VOICE_I=$(ffmpeg -hide_banner -i "$VIDEO" -vn -af ebur128 -f null - 2>&1 | awk '/I:/ && /LUFS/ {v=$2} END {print v}')
+VG=$(awk -v i="$VOICE_I" 'BEGIN { if (i == "" || i < -70) { print 0; exit } g = -14 - i; if (g < -3 || g > 6 || (g < 0.3 && g > -0.3)) g = 0; printf "%.1f", g }')
+echo "人聲 ${VOICE_I:-?} LUFS → 補 ${VG}dB"
+
 ffmpeg -y -i "$VIDEO" -stream_loop -1 -i "$BGM" -filter_complex "
 [1:a]atrim=0:${DUR},afade=t=in:st=0:d=1.0,afade=t=out:st=${FADE_OUT_START}:d=1.5,volume=${VOL}[bgm];
-[0:a][bgm]amix=inputs=2:normalize=0[mix];[mix]alimiter=limit=0.89:level=disabled[aout]
+[0:a]volume=${VG}dB[v0];[v0][bgm]amix=inputs=2:normalize=0[mix];[mix]alimiter=limit=0.87:level=disabled:latency=1,volume=0.96[aout]
 " -map 0:v -map "[aout]" -c:v copy -c:a aac -b:a 192k "$OUT"
 
 echo ""
