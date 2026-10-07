@@ -123,13 +123,20 @@ def _sample_frame_stats(
     with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as f:
         metadata_path = f.name
 
+    # ffmpeg 的 filter 字串裡,「\」是跳脫字元、「:」是選項分隔符 —— Windows 的
+    # 「C:\Users\...\tmpXXXX.txt」直接丟進去會被解析壞掉,ffmpeg 回 -22 Invalid argument
+    # (實測 2026-08-25:自動調色在 Windows 每一段都失敗,整個 render 掛掉)。
+    # 轉成正斜線再把磁碟機代號的冒號跳脫,Mac/Linux 走同一條也不會有影響。
+    # 冒號要「雙層跳脫」(filtergraph 一層、filter 參數一層),實測 `C\:` 不夠,要 `C\\\\:`。
+    metadata_arg = metadata_path.replace("\\", "/").replace(":", r"\\:")
+
     try:
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-nostats",
             "-ss", f"{start:.3f}",
             "-i", str(video),
             "-t", f"{duration:.3f}",
-            "-vf", f"fps={fps:.2f},signalstats,metadata=print:file={metadata_path}",
+            "-vf", f"fps={fps:.2f},signalstats,metadata=print:file={metadata_arg}",
             "-f", "null", "-",
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
