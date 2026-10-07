@@ -18,8 +18,16 @@ What it does:
      (default >= 0.30s) or when a line reaches max display width; absorbs
      orphan fragments (<= 2 CJK chars) into the previous line
 
-Output: captions.json — [{"start": s, "end": s, "text": "..."}, ...]
+Output: captions.json — [{"start": s, "end": s, "text": "...", "char_times": [...]}, ...]
         Times are OUTPUT-timeline seconds, ready for data-start/data-duration.
+        char_times = 每個字(含標點、英文字間空格)開始的秒數,跟 text 一樣長。
+        gen_captions 用它照「字的位置」算第二行 / 螢光筆什麼時候進場(不用文字比對,
+        Whisper 聽錯字也對得到)。長度跟 text 對不上(改過字)就自動退回比例估算。
+
+  斷句 / 改字之後要補回字級時間(加 line2 / kw_fx 前跑一次):
+  python3 edl_to_captions.py <transcript.json> <edl.json> --attach captions.json [--fixes fixes.json]
+      只重算每句的 char_times(逐字對齊,斷句、併句、改幾個字都對得上),
+      start/end/text/hl/line2 一個都不動。改太多對不上的那句就不給,退回比例估算。
 
 The fixes file (--fixes) is a JSON object {"wrong": "right", ...}. Multi-token
 errors are matched on the joined line text after grouping, single tokens at the
@@ -84,6 +92,91 @@ def join_tokens(texts):
             out += " "
         out += t
     return out
+
+
+def join_timed(tokens):
+    """join_tokens 的帶時間版:回傳 (text, 每個字的開始秒數)。一個 token 有好幾個字
+    (「3000」「anyways」)就把它的 [os, oe] 平均分給每個字;英文字間的空格 = 下個字的時間。"""
+    text, times = "", []
+    for x in tokens:
+        if LATIN and text and not x["text"].startswith(PUNCT_START):
+            text += " "
+            times.append(x["os"])
+        n = len(x["text"])
+        span = max(0.0, x["oe"] - x["os"])
+        times += [x["os"] + span * k / n for k in range(n)]
+        text += x["text"]
+    return text, times
+
+
+def replace_timed(text, times, pattern, repl):
+    """re.sub 的帶時間版(fixes 用):被換掉的那段時間,平均分給換上去的字。"""
+    out, out_t, pos = "", [], 0
+    for m in pattern.finditer(text):
+        if m.end() == m.start():
+            continue
+        out += text[pos:m.start()]
+        out_t += times[pos:m.start()]
+        t0, t1 = times[m.start()], times[m.end() - 1]
+        n = len(repl)
+        out_t += [t0 + (t1 - t0) * k / max(1, n - 1) for k in range(n)]
+        out += repl
+        pos = m.end()
+    return out + text[pos:], out_t + times[pos:]
+
+
+def fix_pattern(wrong):
+    if LATIN:   # 不分大小寫,而且要整個字對到("Boars" 不會吃掉 "Boarsmith" 的一半)
+        return re.compile(r"(?<!\w)" + re.escape(wrong) + r"(?!\w)", re.IGNORECASE)
+    return re.compile(re.escape(wrong))
+
+
+def attach_char_times(caps, stream, stream_t):
+    """把逐字稿的字級時間逐字對齊到「已經斷過句 / 改過字」的 captions 上。
+    用整串文字做序列比對(不是一句一句找字串):斷句、併句、改幾個字、加標點都對得上,
+    Whisper 聽錯的字也只是那幾個字沒對到,用前後的字內插。一句裡對到不到一半就不給。"""
+    import difflib
+    flat, owner = "", []
+    for i, c in enumerate(caps):
+        flat += c["text"]
+        owner += [(i, k) for k in range(len(c["text"]))]
+    got = [[None] * len(c["text"]) for c in caps]
+    sm = difflib.SequenceMatcher(None, stream, flat, autojunk=False)
+    for a, b, n in sm.get_matching_blocks():
+        for k in range(n):
+            i, j = owner[b + k]
+            got[i][j] = stream_t[a + k]
+    ok, bad = 0, []
+    for i, c in enumerate(caps):
+        t = got[i]
+        real = [j for j, ch in enumerate(c["text"]) if not ch.isspace()]
+        hit = [j for j in real if t[j] is not None]
+        s, e = float(c["start"]), float(c["end"])
+        mid = sorted(t[j] for j in hit)[len(hit) // 2] if hit else None
+        if not real or len(hit) * 2 < len(real) or not (s - 0.6 <= mid <= e + 0.3):
+            c.pop("char_times", None)
+            bad.append(i)
+            continue
+        for j in range(len(t)):                 # 沒對到的字:前後內插(頭尾就貼最近的)
+            if t[j] is None:
+                lo = next((x for x in range(j - 1, -1, -1) if got[i][x] is not None), None)
+                hi = next((x for x in range(j + 1, len(t)) if got[i][x] is not None), None)
+                if lo is not None and hi is not None:
+                    t[j] = t[lo] + (t[hi] - t[lo]) * (j - lo) / (hi - lo)
+                else:
+                    t[j] = t[lo] if lo is not None else t[hi]
+        for j in range(1, len(t)):              # 時間只能往後走
+            t[j] = max(t[j], t[j - 1])
+        c["char_times"] = [round(x, 2) for x in t]
+        ok += 1
+    return ok, bad
+
+
+def dump_captions(caps):
+    """indent=1 跟以前一樣好讀,但 char_times 壓成一行(不然一個字一行,檔案長十倍)。"""
+    s = json.dumps(caps, ensure_ascii=False, indent=1)
+    return re.sub(r'"char_times": \[\s*([-0-9.,\s]*?)\s*\]',
+                  lambda m: '"char_times": [' + ",".join(v.strip() for v in m.group(1).split(",")) + "]", s)
 
 
 def display_width(s):
@@ -491,6 +584,8 @@ def main():
     ap.add_argument("--video-width", type=int, default=1080, help="跟 gen_captions --w 一樣")
     ap.add_argument("--audio", help="量停頓用的音訊/影片。預設:EDL 模式用 EDL 的來源影片,"
                                     "--no-edl 模式一定要給(就是那支 preview)")
+    ap.add_argument("--attach", metavar="CAPTIONS_JSON",
+                    help="不重新斷句:只幫這份(斷過句/改過字的)captions.json 補回每句的 char_times,其他欄位不動")
     args = ap.parse_args()
 
     edl_ranges = json.loads(Path(args.edl).read_text(encoding="utf-8"))["ranges"] if args.edl else None
@@ -561,23 +656,35 @@ def main():
             if core.lower() in fixes_ci:
                 w["text"] = fixes_ci[core.lower()] + t[len(core):]
     protect_fix_words(words, fixes)
+
+    if args.attach:
+        # 整串一起套 fixes(跨句的多字錯字也換得到),再逐字對齊到現有的句子上
+        stream, stream_t = join_timed(words)
+        for wrong, right in fixes.items():
+            stream, stream_t = replace_timed(stream, stream_t, fix_pattern(wrong), right)
+        path = Path(args.attach)
+        caps = json.loads(path.read_text(encoding="utf-8"))
+        ok, bad = attach_char_times(caps, stream, stream_t)
+        path.write_text(dump_captions(caps), encoding="utf-8")
+        print(f"補回字級時間:{len(caps)} 句裡 {ok} 句對得上 → {path}")
+        for i in bad:
+            print(f"  sub-{i} 「{caps[i]['text']}」對不上(改太多或時間不符),這句的第二行/螢光筆會用比例估算")
+        return
+
     mark_seams(words)
 
     lines = (group_lines_latin if LATIN else group_lines)(words, args.gap, args.max_width)
 
     caps = []
     for ln in lines:
-        text = join_tokens([x["text"] for x in ln])
-        for wrong, right in fixes.items():      # multi-token fixes on joined text
-            if LATIN:   # 不分大小寫,而且要整個字對到("Boars" 不會吃掉 "Boarsmith" 的一半)
-                text = re.sub(r"(?<!\w)" + re.escape(wrong) + r"(?!\w)",
-                              lambda m, r=right: r, text, flags=re.IGNORECASE)
-            else:
-                text = text.replace(wrong, right)
+        text, times = join_timed(ln)
+        for wrong, right in fixes.items():      # multi-token fixes on joined text(時間跟著字走)
+            text, times = replace_timed(text, times, fix_pattern(wrong), right)
         caps.append({
             "start": round(ln[0]["os"], 2),
             "end": round(ln[-1]["oe"], 2),
             "text": text,
+            "char_times": [round(t, 2) for t in times],
         })
 
     overlaps = [i for i in range(1, len(caps))
@@ -585,8 +692,7 @@ def main():
     if overlaps:
         sys.exit(f"BUG: overlapping captions at indexes {overlaps} — report this")
 
-    Path(args.output).write_text(
-        json.dumps(caps, ensure_ascii=False, indent=1), encoding="utf-8")
+    Path(args.output).write_text(dump_captions(caps), encoding="utf-8")
     for i, c in enumerate(caps):
         print(f"{i:3} {c['start']:7.2f}-{c['end']:7.2f}  {c['text']}")
     print(f"\n{len(caps)} lines → {args.output}  (no overlaps)")

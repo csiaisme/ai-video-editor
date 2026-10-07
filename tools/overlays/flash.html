@@ -1,0 +1,28 @@
+<!-- 疊加卡片模板 flash(相機閃光)
+     來源:HyperFrames registry「editorial-flash-overlay」。三層光(白底 wash + 放射核心 + 斜掃光)照原版,
+     改編:直式(光心移到畫面上半、臉的位置附近)、閃的時間 = clip 開始後 0.05 秒(overlays.py 把 at 對到揭曉那格),
+     強度 strength 乘在三層的亮度上。混色 screen 加在外層 clip(內層加會被 z-index 隔離、變成一般白色)。 -->
+<style>
+      .ov-flash { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+      .ov-fl-layer { position:absolute; inset:0; opacity:0; }
+      .ov-fl-wash { background:rgb(255 253 250); }
+      .ov-fl-core { inset:-18%; transform-origin:55% 34%;
+        background:radial-gradient(ellipse 92% 62% at 55% 34%, rgb(255 255 255) 0%, rgb(255 255 255 / 98%) 20%,
+          rgb(255 253 250 / 86%) 45%, rgb(255 174 105 / 32%) 67%, transparent 86%); }
+      .ov-fl-sweep { inset:-28%;
+        background:linear-gradient(118deg, transparent 21%, rgb(255 174 105 / 10%) 38%, rgb(255 253 250 / 90%) 49%,
+          rgb(255 255 255 / 98%) 53%, rgb(183 218 255 / 24%) 62%, transparent 79%); }
+</style>
+<template>
+<div class="ov-fl-layer ov-fl-wash" id="{{u}}-wash"></div>
+<div class="ov-fl-layer ov-fl-core" id="{{u}}-core" data-layout-allow-overflow></div>
+<div class="ov-fl-layer ov-fl-sweep" id="{{u}}-sweep" data-layout-allow-overflow></div>
+</template>
+<script>
+      {{O}}.to("#{{u}}-wash", { opacity: {{wash}}, duration: 0.04, ease: "power4.in" }, {{hit}});
+      {{O}}.fromTo("#{{u}}-core", { opacity: 0, scale: 0.86, rotation: -5 }, { opacity: {{core}}, scale: 1, rotation: -5, duration: 0.05, ease: "power4.in" }, {{hit}} - 0.01);
+      {{O}}.fromTo("#{{u}}-sweep", { opacity: 0, xPercent: -12, rotation: -2 }, { opacity: {{sweep}}, xPercent: 8, rotation: -2, duration: 0.04, ease: "power4.in" }, {{hit}});
+      {{O}}.to("#{{u}}-wash", { opacity: 0, duration: 0.18, ease: "power3.out" }, {{hit}} + 0.04);
+      {{O}}.to("#{{u}}-core", { opacity: 0, scale: 1.18, rotation: -5, duration: 0.34, ease: "power2.out" }, {{hit}} + 0.04);
+      {{O}}.to("#{{u}}-sweep", { opacity: 0, xPercent: 28, rotation: -2, duration: 0.3, ease: "power2.out" }, {{hit}} + 0.04);
+</script>

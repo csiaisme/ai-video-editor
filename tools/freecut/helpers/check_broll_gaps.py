@@ -30,7 +30,7 @@ class _Clips(HTMLParser):
         if tag not in ("video", "img"):
             return
         a = {k: (v or "") for k, v in attrs}
-        if a.get("id", "").startswith("a-roll"):
+        if a.get("id", "").startswith("a-roll") or "data-tx-aroll" in a:   # 轉場用的主畫面副本不是 b-roll
             return
         if "data-start" not in a or "data-duration" not in a:
             return

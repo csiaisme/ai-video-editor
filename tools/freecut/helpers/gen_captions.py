@@ -12,6 +12,20 @@ Input: a captions JSON, a list of
     {"start": float, "end": float, "text": str, "hl": "substring"?}
 `hl` is optional; that substring is painted yellow (colour only, same font).
 
+字幕第二段特效(特效層 G 才加,都寫在 captions.json,重產字幕不會洗掉):
+    "line2": "滋生細菌"   兩行字幕:text 的「結尾」那段變成第二行,講到才進場(第一行 = 前面那段)。
+                          有 line2 的句子不再塗第一行的黃字。line2 不是 text 的結尾 → 印 ⚠、照一行出。
+    "enter": stamp|slide|drop|type|pop   第二行怎麼進場(可省略 = 自動輪替)
+    "line2_at": 秒        手動指定第二行進場(可省略)
+    "line2_sfx": false    這句不配音效
+    "kw_fx": "marker"     螢光筆:講到 hl 那個詞時,黃色螢光筆從左刷過去。沒寫 = 照舊整句靜態塗黃
+    "kw_at": 秒           手動指定螢光筆時間(可省略)
+    "kw_sfx": false       這句螢光筆不配提示音(預設配相機對焦「嗶」)
+  進場時間照「字的位置」算:edl_to_captions 寫的 char_times(每個字的秒數)→ 那個字的時間;
+  沒有 char_times、或字改過長度對不上 → 退回比例估算(句首 + 句長 × 前面字數 / 總字數)。
+  第二行的音效寫進 sfx_cues.json(跟 transitions.py 同一份),第 7 步 sfx_cues.py mix 一次混。
+  --l2-style soft(預設,黃字黑框 84px)/ mid(96px 描邊)/ heavy(120px 粗描邊):使用者說「第二行大一點、強一點」就調這個。
+
 The emitted index.html has clearly-marked CREATIVE LAYER / CREATIVE TIMELINE
 slots. Add title cards, pixel sprites, b-roll cutaways, camera moves there, then
 `npx hyperframes lint` (should pass clean) and render.
@@ -36,6 +50,9 @@ import json
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sfx_cues  # noqa: E402
 
 FONTS = {
     "宋體": {"families": ["Source Han Serif TC VF", "Source Han Serif TC"], "weight": 600},
@@ -78,9 +95,200 @@ def hl_html(text: str, hl: str | None, hl_color: str | None = None) -> str:
     return t
 
 
+# ---- 字幕第二段特效:兩行字幕(line2)+ 螢光筆(kw_fx: marker)----
+# 原型與比較:kw_d.py / kw_fx.py(2026-10-06,熊熊-02 實測)。Jake 選了兩行字幕 C 質感 + 溫和進場、螢光筆。
+# 字級時間 → 進場秒數要不要加偏移:熊熊-02 6 句,跟「人聲 + 波形手對」的進場點比,
+# EDL 對映的逐字稿平均晚 0.08 秒、重轉 preview 的逐字稿平均早 0.01 秒 → 不加。
+WORD_LAG = 0.0
+PUNCT = set("，。、！？：；「」『』（）—…,.!?:;\"' ")
+HEAVY = '"CJKHeavy","Source Han Serif TC VF","Source Han Serif TC",sans-serif'
+L2_TRACK = 30          # 第二行的時間軌(句子不重疊,一條軌就夠;避開特效層常用的 6-19、轉場的 40+)
+ENTRANCES = ["slide", "drop", "type", "pop", "stamp"]   # 沒寫 enter 時的輪替順序(最中性的 slide 先)
+# 進場 → (音效 預設包/音效/ 底下, volume, 比進場早/晚幾秒放, 只用前幾秒)
+# volume 是量「音效發聲那 0.5 秒」比人聲平均低 ~11dB 調的。hit 有 4 秒長尾,整檔 LUFS 換算會太大聲(對照表的 0.27 剪短用要降)。
+L2_SFX = {
+    "stamp": ("4-電影感/hit.mp3", 0.075, -0.04, 0.6),
+    "slide": ("3-轉場/woosh-1.mp3", 0.357, -0.05, 0.42),
+    "drop":  ("3-轉場/woop.mp3", 0.26, -0.05, 0.4),
+    "type":  ("2-介面科技/keyboard-typing.mp3", 1.44, 0.0, 0.5),
+    "pop":   ("6-卡通復古/pop.mp3", 0.341, -0.18, 0.6),       # 檔案前面有 0.22 秒空白,提早放
+}
+# 第二行強度。soft = Jake 選的預設(C 質感:黃字、跟第一行同款黑框);mid / heavy = 使用者說「大一點、強一點」
+L2_STYLES = {
+    "soft":  {"cap": 84, "pad": 34, "css": "font-weight:700; color:#FFDD55; padding:6px 24px; border-radius:14px; "
+                                           "background:rgba(0,0,0,0.72); box-shadow:0 4px 18px rgba(0,0,0,0.35);"},
+    "mid":   {"cap": 96, "pad": 22, "css": "font-weight:800; color:#FFD400; -webkit-text-stroke:6px #111; "
+                                           "paint-order:stroke fill; text-shadow:0 4px 12px rgba(0,0,0,.45);"},
+    "heavy": {"cap": 120, "pad": 22, "css": "font-weight:900; color:#FFD400; -webkit-text-stroke:12px #111; "
+                                            "paint-order:stroke fill; text-shadow:0 8px 22px rgba(0,0,0,.55);"},
+}
+KW_FX = ("marker",)
+# 螢光筆的提示音:相機對焦「嗶」(Jake 2026-10-07 挑的,Pixabay)。嗶在檔案第 0.78 秒 → 提早 0.68 秒放,
+# 嗶落在螢光筆刷到一半(T+0.1)。前面那段是鏡頭對焦的馬達聲,當前導。一樣算在整支音效額度裡。
+MARKER_SFX = ("3-轉場/camera-focus.mp3", 0.327, -0.68)
+
+
+def _n_units(s: str) -> int:
+    return sum(1 for ch in s if ch not in PUNCT and not ch.isspace())
+
+
+def _onset(c: dict, idx: int) -> tuple[float, str]:
+    """text 第 idx 個字開口的秒數。有 char_times(長度跟 text 一樣)就用字的時間,
+    否則比例估算(工具箱第 4 點的規則:句首 + 句長 × 前面字數 / 總字數,提早 0.08)。"""
+    s, e = float(c["start"]), float(c["end"])
+    ct = c.get("char_times")
+    if isinstance(ct, list) and len(ct) == len(c["text"]) and 0 <= idx < len(ct):
+        try:
+            t = float(ct[idx]) + WORD_LAG
+            if s - 0.6 <= t <= e:
+                return t, "字級時間"
+        except (TypeError, ValueError):
+            pass
+    t = s + (e - s) * _n_units(c["text"][:idx]) / max(1, _n_units(c["text"])) - 0.08
+    return t, "比例估算"
+
+
+def plan_caption_fx(captions: list[dict]) -> tuple[dict, list[str]]:
+    """決定每句的第二段特效。回傳 (plan, notes)。
+    plan[i] = {"kind": "line2", "line1", "line2", "enter", "T", "src", "sfx"} 或 {"kind": "marker", "T", "src"}。
+    規則(Round 2 實測):同一種進場不連續兩次;stamp 每 30 秒最多 1 次;一分鐘最多 4 個兩行字幕;
+    同一個音效 15 秒內不重複。違反的「不連續 / stamp」自動改掉並印出來,密度只提醒(要刪哪句是內容判斷)。"""
+    plan, notes = {}, []
+    for i, c in enumerate(captions):
+        text, s, e = c["text"], float(c["start"]), float(c["end"])
+        l2 = c.get("line2")
+        if l2:
+            l2 = str(l2)
+            line1 = text[: len(text) - len(l2)].rstrip() if text.endswith(l2) else ""
+            if not text.endswith(l2) or _n_units(line1) < 1:
+                notes.append(f"⚠ sub-{i} line2「{l2}」不是「{text}」的結尾(字改過?),這句照一行出")
+            elif e - s < 0.6:
+                notes.append(f"⚠ sub-{i} 句子只有 {e - s:.2f} 秒,兩段看不出來,這句照一行出")
+            else:
+                if "line2_at" in c:
+                    t, src = float(c["line2_at"]), "手動"
+                else:
+                    t, src = _onset(c, len(text) - len(l2))
+                T = round(min(max(t, s + 0.2), e - 0.3), 3)
+                plan[i] = {"kind": "line2", "line1": line1, "line2": l2, "T": T, "src": src}
+                if c.get("kw_fx"):
+                    notes.append(f"  sub-{i} 有 line2,kw_fx 不用(第二行本身就是重點)")
+                continue
+        fx = c.get("kw_fx")
+        if fx:
+            hl = c.get("hl")
+            if fx not in KW_FX:
+                notes.append(f"⚠ sub-{i} kw_fx「{fx}」不認得(目前只有 marker),照舊靜態塗黃")
+            elif not hl or hl not in text:
+                notes.append(f"⚠ sub-{i} kw_fx 要搭 hl,而且 hl 要在句子裡,照一般字幕出")
+            else:
+                if "kw_at" in c:
+                    t, src = float(c["kw_at"]), "手動"
+                else:
+                    t, src = _onset(c, text.index(hl))
+                T = round(min(max(t, s + 0.15), max(s + 0.15, e - 0.25)), 3)
+                plan[i] = {"kind": "marker", "T": T, "src": src}
+
+    # 進場輪替 + 音效
+    prev, stamps, last_sfx = None, [], {}
+    l2s = sorted((p["T"], i) for i, p in plan.items() if p["kind"] == "line2")
+    for T, i in l2s:
+        c, p = captions[i], plan[i]
+
+        def ok(k: str) -> bool:
+            return k != prev and not (k == "stamp" and stamps and T - stamps[-1] < 30)
+
+        want = c.get("enter")
+        if want and want not in L2_SFX:
+            notes.append(f"⚠ sub-{i} enter「{want}」不認得(stamp/slide/drop/type/pop),改自動")
+            want = None
+        if want and not ok(want):
+            why = "跟上一句同一種進場" if want == prev else "30 秒內已經有一個 stamp"
+            notes.append(f"⚠ sub-{i} enter「{want}」{why},改自動")
+            want = None
+        if not want:
+            k0 = ENTRANCES.index(prev) + 1 if prev in ENTRANCES else 0
+            want = next(ENTRANCES[(k0 + k) % len(ENTRANCES)] for k in range(len(ENTRANCES))
+                        if ok(ENTRANCES[(k0 + k) % len(ENTRANCES)]))
+        p["enter"], prev = want, want
+        if want == "stamp":
+            stamps.append(T)
+        f, vol, off, trim = L2_SFX[want]
+        if c.get("line2_sfx") is False:
+            p["sfx"] = None
+        elif f in last_sfx and T - last_sfx[f] < 15:
+            p["sfx"] = None
+            notes.append(f"  sub-{i} 音效 {f} 跟 {last_sfx[f]}s 那個太近(< 15 秒),這句不配音效")
+        else:
+            p["sfx"] = sfx_cues.make_cue(f, T + off, vol, "兩行字幕", note=f"sub-{i} {want} {p['line2']}", trim=trim)
+            last_sfx[f] = T
+    # 螢光筆提示音:同一個音效 15 秒內不重複;寫 "kw_sfx": false 就不配
+    last_mk = None
+    for T, i in sorted((p["T"], i) for i, p in plan.items() if p["kind"] == "marker"):
+        p, f, vol, off = plan[i], *MARKER_SFX
+        if captions[i].get("kw_sfx") is False:
+            p["sfx"] = None
+        elif last_mk is not None and T - last_mk < 15:
+            p["sfx"] = None
+            notes.append(f"  sub-{i} 螢光筆提示音跟 {last_mk}s 那個太近(< 15 秒),這句不配")
+        else:
+            p["sfx"] = sfx_cues.make_cue(f, max(0.0, T + off), vol, "螢光筆", note=f"sub-{i} 對焦嗶 {captions[i]['hl']}")
+            last_mk = T
+    for k, (T, i) in enumerate(l2s):
+        n = sum(1 for T2, _ in l2s if T <= T2 < T + 60)
+        if n > 4:
+            notes.append(f"⚠ {T:.1f}s 起一分鐘內有 {n} 個兩行字幕(建議最多 4 個),挑掉比較不重要的")
+            break
+    return plan, notes
+
+
+def _marker_html(text: str, hl: str, i: int) -> str:
+    t, h = html.escape(text), html.escape(hl)
+    chars = "".join(f'<span class="mkc">{html.escape(ch)}</span>' for ch in hl)
+    mk = (f'<span class="kwmk" id="kwm-{i}"><span class="mkbar" id="mkb-{i}"></span>'
+          f'<span class="mkt" id="mkt-{i}">{chars}</span></span>')
+    return t.replace(h, mk, 1)
+
+
+def _l2_js(kind: str, i: int, T: float, shift: int) -> str:
+    t = f"#l2t-{i}"
+    js = f"""
+      // sub-{i} 兩行字幕 · {kind} @ {T}(第一行往上讓位)
+      tl.fromTo("#sub-{i} .sub-inner", {{ y:0 }}, {{ y:-{shift}, duration:.2, ease:"power2.out" }}, {T});"""
+    if kind == "drop":
+        js += f"""
+      tl.fromTo("{t}", {{ opacity:0, y:-50 }}, {{ opacity:1, y:0, duration:.4, ease:"back.out(1.4)" }}, {T});"""
+    elif kind == "stamp":
+        js += f"""
+      tl.fromTo("{t}", {{ opacity:0 }}, {{ opacity:1, duration:.04, ease:"none" }}, {T});
+      tl.fromTo("{t}", {{ scale:1.3, rotation:-3 }},
+        {{ scale:1, rotation:0, duration:.2, ease:"power2.out", immediateRender:false }}, {T});"""
+    elif kind == "slide":
+        js += f"""
+      tl.fromTo("{t}", {{ opacity:0, x:220 }}, {{ opacity:1, x:0, duration:.38, ease:"back.out(1.2)" }}, {T});"""
+    elif kind == "type":
+        js += f"""
+      tl.fromTo("{t} .l2c", {{ opacity:0, y:12, scale:.85 }}, {{ opacity:1, y:0, scale:1, duration:.16, ease:"power2.out", stagger:.07 }}, {T});"""
+    elif kind == "pop":
+        js += f"""
+      tl.fromTo("{t}", {{ opacity:0, scale:.6 }}, {{ opacity:1, scale:1, duration:.32, ease:"back.out(1.6)" }}, {T});"""
+    return js
+
+
+def _marker_js(i: int, T: float, n: int) -> str:
+    return f"""
+      // sub-{i} 螢光筆 @ {T}
+      gsap.set("#mkb-{i}", {{ scaleX:0, skewX:-6, transformOrigin:"0% 50%" }});
+      tl.fromTo("#mkb-{i}", {{ scaleX:0 }}, {{ scaleX:1, duration:.32, ease:"power2.out" }}, {T});
+      tl.fromTo("#mkt-{i} .mkc", {{ color:"#ffffff" }}, {{ color:"#111111", duration:.06, stagger:{round(.3 / max(1, n), 3)} }}, {round(T + .03, 3)});
+      tl.fromTo("#kwm-{i}", {{ scale:1 }}, {{ scale:1.1, duration:.13, yoyo:true, repeat:1, ease:"back.out(3)" }}, {round(T + .22, 3)});"""
+
+
 def build(captions: list[dict], video: str, w: int, h: int,
           duration: float, font_key: str, style_key: str = "classic",
-          font_size: int = 56, sub_bottom: str = "var(--safe-bottom)") -> str:
+          font_size: int = 56, sub_bottom: str = "var(--safe-bottom)",
+          l2_style: str = "soft", fx_out: dict | None = None) -> str:
+    """fx_out(可選):傳一個 dict 進來,會填 {"plan", "notes", "cues"}(兩行字幕/螢光筆的決定跟音效)。"""
     f = FONTS[font_key]
     st = STYLES[style_key]
     st_inner, st_kw = st["inner"], st["kw"]
@@ -124,21 +332,69 @@ def build(captions: list[dict], video: str, w: int, h: int,
             u += (kw_scale - 1.0) * sum(0.55 if ord(ch) < 0x2E80 else 1.0 for ch in hl)
         return u
 
-    subs, shrunk = [], []
+    plan, notes = plan_caption_fx(captions)
+    l2st = L2_STYLES[l2_style]
+    subs, shrunk, l2_clips, fx_js, cues, mk_cues = [], [], [], [], [], []
     for i, c in enumerate(captions):
         dur = round(float(c["end"]) - float(c["start"]), 2)
-        u = units(c["text"], c.get("hl"))
+        p = plan.get(i, {})
+        text = p["line1"] if p.get("kind") == "line2" else c["text"]
+        hl = None if p.get("kind") == "line2" else c.get("hl")   # 有第二行就不塗第一行(兩個黃搶戲)
+        u = units(text, hl if p.get("kind") != "marker" else None) + (0.1 if p.get("kind") == "marker" else 0)
         size_attr = ""
         if u * font_size > room:
             fs = int(room / u * 10) / 10
             size_attr = f' style="font-size:{fs}px"'
-            shrunk.append((i, c["text"], fs))
+            shrunk.append((i, text, fs))
+        inner = _marker_html(text, hl, i) if p.get("kind") == "marker" else hl_html(text, hl, c.get("hl_color"))
         subs.append(
             f'      <div id="sub-{i}" class="clip sub"{size_attr} data-start="{c["start"]}" '
             f'data-duration="{dur}" data-track-index="5">'
-            f'<span class="sub-inner">{hl_html(c["text"], c.get("hl"), c.get("hl_color"))}</span></div>'
+            f'<span class="sub-inner">{inner}</span></div>'
         )
+        if p.get("kind") == "line2":
+            T, l2 = p["T"], p["line2"]
+            fs2 = int(min(l2st["cap"], 800 / max(1, units(l2, None))))
+            shift = int(fs2 * 1.2 + l2st["pad"])
+            body = ("".join(f'<span class="l2c">{"&nbsp;" if ch == " " else html.escape(ch)}</span>' for ch in l2)
+                    if p["enter"] == "type" else html.escape(l2))
+            l2_clips.append(f'      <div id="l2-{i}" class="clip l2w" data-start="{T}" '
+                            f'data-duration="{round(float(c["end"]) - T, 3)}" data-track-index="{L2_TRACK}">'
+                            f'<span class="l2" id="l2t-{i}" style="font-size:{fs2}px">{body}</span></div>')
+            fx_js.append(_l2_js(p["enter"], i, T, shift))
+            if p["sfx"]:
+                cues.append(p["sfx"])
+        elif p.get("kind") == "marker":
+            fx_js.append(_marker_js(i, p["T"], len(hl)))
+            if p.get("sfx"):
+                mk_cues.append(p["sfx"])
     subs_html = "\n".join(subs)
+    if fx_out is not None:
+        fx_out.update(plan=plan, notes=notes, cues=cues, mk_cues=mk_cues)
+
+    used = {p["kind"] for p in plan.values()}
+    fx_css = ""
+    if "line2" in used:
+        fx_css += f"""      /* ==== 兩行字幕(captions.json 的 line2,強度 {l2_style}):第一行 = 鋪陳,第二行 = 重點,講到才進場 ====
+         第二行在第一行後面一層(z 19),整組底線不變、往上長。改內容請改 captions.json 重跑 gen_captions。 */
+      @font-face {{ font-family:"CJKHeavy";
+        src: local("FZLTTHB--B51-0"), local("Lantinghei TC Heavy"), local("PingFangTC-Semibold"),
+             local("MicrosoftJhengHeiBold"), local("Microsoft JhengHei Bold"); font-weight:100 900; }}
+      .l2w {{ position:absolute; left:0; right:0; bottom:{sub_bottom}; text-align:center; z-index:19; pointer-events:none; }}
+      .l2 {{ display:inline-block; font-family:{HEAVY}; line-height:1.1; white-space:nowrap; {l2st["css"]} }}
+      .l2 .l2c {{ display:inline-block; }}
+"""
+    if "marker" in used:
+        fx_css += """      /* ==== 螢光筆(captions.json 的 kw_fx: marker):講到關鍵字時黃色螢光筆從左刷過去、字變黑 ==== */
+      .kwmk { position:relative; display:inline-block; margin:0 .05em; }
+      .kwmk .mkbar { position:absolute; z-index:1; left:-.04em; right:-.04em; top:.15em; bottom:.1em;
+        background:#FFD400; border-radius:.1em .22em .12em .2em; }
+      .kwmk .mkt { position:relative; z-index:2; color:#fff; }
+      .kwmk .mkc { -webkit-text-fill-color:currentColor; }
+"""
+    fx_clips = ("\n" + "\n".join(l2_clips)) if l2_clips else ""
+    fx_js_block = ("\n      /* ==== CAPTION FX:gen_captions 依 captions.json(line2 / kw_fx)產生,"
+                   "要改請改 captions.json 重跑 ==== */" + "".join(fx_js) + "\n") if fx_js else ""
     if shrunk:
         print(f"長句縮字級({len(shrunk)} 句超過字幕框 {room}px,只縮這幾句):", file=sys.stderr)
         for i, t, fs in shrunk:
@@ -177,7 +433,7 @@ def build(captions: list[dict], video: str, w: int, h: int,
       /* 樣式 = {style_key}。sub-inner / kw 由 STYLES 決定;定位與安全區在 .sub。 */
       .sub-inner {{ {st_inner} }}
       .kw {{ {st_kw} }}   /* keyword highlight（樣式決定顏色/大小） */
-
+{fx_css}
       /* ==== CREATIVE LAYER styles: add your title-card / sprite / b-roll / callout CSS here ==== */
 
     </style>
@@ -211,14 +467,14 @@ def build(captions: list[dict], video: str, w: int, h: int,
       -->
 
       <!-- subtitles -->
-{subs_html}
+{subs_html}{fx_clips}
     </div>
 
     <script>
       window.__timelines = window.__timelines || {{}};
       const tl = gsap.timeline({{ paused: true }});
       gsap.set("#a-roll", {{ transformOrigin: "50% 42%" }});
-
+{fx_js_block}
       /* ==== CREATIVE TIMELINE: add GSAP tweens at absolute output seconds ====
          Only deterministic animation (no Math.random / Date.now / infinite repeat).
          Examples:
@@ -249,6 +505,11 @@ def main() -> None:
     ap.add_argument("--sub-bottom", default="var(--safe-bottom)",
                     help="字幕離畫面底部多高,例如 340px(預設 var(--safe-bottom) = IG 安全區下緣 451px)。"
                          "調低於 450px 會進到 IG 介面區,發 Reels 可能被帳號列/進度條蓋到 —— 要跟使用者講。")
+    ap.add_argument("--l2-style", choices=list(L2_STYLES), default="soft",
+                    help="兩行字幕第二行的強度:soft(預設,84px 黃字黑框)/ mid(96px 描邊)/ heavy(120px 粗描邊)")
+    ap.add_argument("--sfx-cues", type=Path, default=None,
+                    help="第二行進場音效寫到哪(預設跟 index.html 同資料夾的 sfx_cues.json;"
+                         "只改「兩行字幕」那幾筆,轉場的保留)")
     ap.add_argument("-o", "--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -258,9 +519,29 @@ def main() -> None:
     if not isinstance(captions, list) or not captions:
         sys.exit("captions JSON must be a non-empty list of {start,end,text}")
 
+    fx: dict = {}
     html_out = build(captions, args.video, args.w, args.h, args.duration, args.font, args.style,
-                     args.font_size, args.sub_bottom)
+                     args.font_size, args.sub_bottom, args.l2_style, fx_out=fx)
     args.out.write_text(html_out, encoding="utf-8")
+
+    # 兩行字幕 / 螢光筆:印出每句的決定(時間是字級時間還是比例估算),音效寫進共用的 sfx_cues.json
+    for i, p in sorted(fx["plan"].items()):
+        c = captions[i]
+        if p["kind"] == "line2":
+            snd = Path(p["sfx"]["sfx"]).stem if p.get("sfx") else "無音效"
+            print(f"兩行字幕 sub-{i}  {p['line1']} / {p['line2']}  {p['enter']} @ {p['T']}({p['src']},{snd})")
+        else:
+            snd = "對焦嗶" if p.get("sfx") else "無音效"
+            print(f"螢光筆   sub-{i}  {c['text']} [{c['hl']}] @ {p['T']}({p['src']},{snd})")
+    for n in fx["notes"]:
+        print(n)
+    cues_path = args.sfx_cues or args.out.with_name("sfx_cues.json")
+    sfx_cues.save(cues_path, "螢光筆", fx["mk_cues"])
+    for wmsg in sfx_cues.save(cues_path, "兩行字幕", fx["cues"]):
+        print(wmsg)
+    if fx["cues"] or fx["mk_cues"]:
+        print(f"wrote {cues_path}({len(fx['cues'])} 個第二行音效、{len(fx['mk_cues'])} 個螢光筆提示音,"
+              f"第 7 步 sfx_cues.py mix 會一起混)")
 
     # 樣式側檔:給審片頁用,讓預覽字幕跟成品同字型/字級/位置。
     # 學員回報(五份):審片頁用自己的通用樣式,使用者對「不存在的問題」下指令
@@ -271,7 +552,7 @@ def main() -> None:
         "font": args.font, "families": FONTS[args.font]["families"],
         "weight": FONTS[args.font]["weight"], "style": args.style,
         "font_size": args.font_size, "video_w": args.w, "video_h": args.h,
-        "sub_bottom_px": bottom_px,
+        "sub_bottom_px": bottom_px, "l2_style": args.l2_style,
     }
     args.out.with_name("樣式.json").write_text(
         json.dumps(style_meta, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -48,12 +48,13 @@ BIG_DIRS=(node_modules clips_preview __pycache__ chk .hyperframes)
 # 它們被 index.html 直接引用,而且**不是配方能重生的** — 刪掉之後重跑 render 不會報錯,
 # 只是畫面上那個元素安靜地消失,學員根本不會發現。
 # (學員回報兩次:b-roll 影片被刪,因為這裡原本只保護圖片。)
-# 唯一例外是主畫面 a-roll(id="a-roll" / "a-roll-audio"):它很大,而且重跑 render.py 就會再生。
+# 唯一例外是主畫面 a-roll(id="a-roll" / "a-roll-audio",以及 transitions.py 做轉場用的
+# 主畫面副本 data-tx-aroll):它很大,而且重跑 render.py 就會再生。
 MEDIA_REF='png|jpg|jpeg|gif|svg|webp|mp4|mov|m4v|webm|mkv|wav|mp3|m4a|aac'
 KEEP_RE=""
 for html in $(find "${SCAN_DIRS[@]}" -type f -name "*.html" 2>/dev/null); do
-  # 抓 src="..." / href="..." / url(...) 裡的本機素材檔名;a-roll 那兩行跳過
-  refs="$(grep -vE 'id="a-roll(-audio)?"' "$html" 2>/dev/null \
+  # 抓 src="..." / href="..." / url(...) 裡的本機素材檔名;a-roll 那兩行(跟轉場的副本)跳過
+  refs="$(grep -vE 'id="a-roll(-audio)?"|data-tx-aroll' "$html" 2>/dev/null \
           | grep -oE "(src|href)=\"[^\"]+\.($MEDIA_REF)\"|url\(([\"']?)[^)\"']+\.($MEDIA_REF)" \
           | grep -oE "[^/\"'(=]+\.($MEDIA_REF)" || true)"
   for r in $refs; do

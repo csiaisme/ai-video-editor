@@ -1,0 +1,30 @@
+<!-- 疊加卡片模板 light-leak(暖色漏光)
+     來源:HyperFrames registry「organic-light-leak-overlay」。三層模糊色光慢慢飄、淡入淡出,照原版時序(按 D 比例)。
+     改編:直式重排光源位置 —— 原版紅光在右上(直式剛好是臉),移到左上/左下,臉只吃到很淡的金色掃光;
+     strength(預設 0.7)乘在亮度上。混色 screen 加在外層 clip。 -->
+<style>
+      .ov-light-leak { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+      .ov-lk { position:absolute; inset:-16%; opacity:0; }
+      .ov-lk-layer { position:absolute; inset:-20%; }
+      .ov-lk-amber { background:radial-gradient(ellipse 70% 52% at 8% 62%, rgb(255 241 197 / 92%), transparent 45%),
+          radial-gradient(ellipse 95% 62% at 18% 58%, rgb(255 126 57 / 78%), transparent 66%); filter:blur(40px); }
+      .ov-lk-red { background:radial-gradient(ellipse 78% 50% at 20% 22%, rgb(255 79 61 / 72%), rgb(255 44 92 / 28%) 48%, transparent 76%);
+        filter:blur(56px); }
+      .ov-lk-gold { background:linear-gradient(160deg, transparent 24%, rgb(255 144 62 / 26%) 40%, rgb(255 247 205 / 60%) 51%,
+          rgb(255 124 48 / 20%) 62%, transparent 78%); filter:blur(30px); }
+</style>
+<template>
+<div class="ov-lk" id="{{u}}-lk" data-layout-allow-overflow>
+  <div class="ov-lk-layer ov-lk-amber" id="{{u}}-a" data-layout-allow-overflow></div>
+  <div class="ov-lk-layer ov-lk-red" id="{{u}}-r" data-layout-allow-overflow></div>
+  <div class="ov-lk-layer ov-lk-gold" id="{{u}}-g" data-layout-allow-overflow></div>
+</div>
+</template>
+<script>
+      {{O}}.fromTo("#{{u}}-lk", { opacity: 0 }, { opacity: {{peak}}, duration: {{D}} * 0.24, ease: "sine.out" }, {{D}} * 0.08);
+      {{O}}.to("#{{u}}-lk", { opacity: {{mid}}, duration: {{D}} * 0.2, ease: "sine.inOut" }, {{D}} * 0.42);
+      {{O}}.to("#{{u}}-lk", { opacity: 0, duration: {{D}} * 0.26, ease: "sine.in" }, {{D}} * 0.68);
+      {{O}}.fromTo("#{{u}}-a", { yPercent: -14, scale: 0.92, rotation: -4 }, { yPercent: 12, scale: 1.1, rotation: 2, duration: {{D}}, ease: "sine.inOut" }, 0);
+      {{O}}.fromTo("#{{u}}-r", { xPercent: 14, yPercent: -10, scale: 1.08 }, { xPercent: -10, yPercent: 10, scale: 0.94, duration: {{D}}, ease: "sine.inOut" }, 0);
+      {{O}}.fromTo("#{{u}}-g", { yPercent: -24, rotation: -6 }, { yPercent: 20, rotation: 4, duration: {{D}}, ease: "sine.inOut" }, 0);
+</script>

@@ -1,0 +1,37 @@
+<!-- 疊加卡片模板 notification(手機/電腦跳通知)
+     來源:HyperFrames registry「macos-notification」(原本 1920x1080 右上角 380px 寬)。改編:直式專用版 —
+     原 block 不會跟著畫面放大(放進直式只剩一小張),所以字級/尺寸全部重算;放左上安全區(右半邊是臉),
+     從上面掉下來;中文字型;app 圖示換成通用的對話框(不用 Apple 的圖示)。
+     參數:app(訊息)、title(寄件人)、text(內容,最多兩行)、time(現在)、icon_color。 -->
+<style>
+      .ov-notification { position:absolute; left:var(--safe-left, 54px); width:530px; pointer-events:none; }
+      .ov-nt-card { display:flex; gap:20px; align-items:flex-start; padding:24px 26px; border-radius:34px;
+        background:rgba(30,30,30,.84); backdrop-filter:blur(30px); -webkit-backdrop-filter:blur(30px);
+        box-shadow:0 14px 44px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.12);
+        font-family:"OvSans","Source Han Serif TC VF","Source Han Serif TC",sans-serif; }
+      .ov-nt-icon { width:76px; height:76px; border-radius:18px; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+      .ov-nt-icon svg { width:48px; height:48px; display:block; }
+      .ov-nt-body { flex:1; min-width:0; }
+      .ov-nt-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+      .ov-nt-app { font-size:26px; font-weight:700; color:rgba(255,255,255,.55); letter-spacing:.04em; }
+      .ov-nt-time { font-size:24px; color:rgba(255,255,255,.4); }
+      .ov-nt-title { font-size:36px; font-weight:700; color:#fff; line-height:1.3; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .ov-nt-text { font-size:31px; color:rgba(255,255,255,.78); line-height:1.38; display:-webkit-box; -webkit-line-clamp:2;
+        -webkit-box-orient:vertical; overflow:hidden; }
+</style>
+<template>
+<div class="ov-nt-card" id="{{u}}-card">
+  <div class="ov-nt-icon" style="background:{{icon}};"><svg viewBox="0 0 48 48"><path d="M24 8c-10 0-18 6.6-18 14.8 0 4.7 2.7 8.9 6.9 11.6L11 41l8.2-4.1c1.5.3 3.1.5 4.8.5 10 0 18-6.6 18-14.8S34 8 24 8z" fill="#fff"/></svg></div>
+  <div class="ov-nt-body">
+    <div class="ov-nt-head"><span class="ov-nt-app">{{app}}</span><span class="ov-nt-time">{{time}}</span></div>
+    <div class="ov-nt-title">{{title}}</div>
+    <div class="ov-nt-text">{{text}}</div>
+  </div>
+</div>
+</template>
+<script>
+      gsap.set("#{{u}}-card", { y: -140, opacity: 0 });
+      {{O}}.to("#{{u}}-card", { y: 0, opacity: 1, duration: 0.45, ease: "power3.out" }, 0.05);
+      {{O}}.fromTo("#{{u}}-card", { scale: 1 }, { scale: 1.03, duration: 0.12, yoyo: true, repeat: 1, ease: "power1.out" }, 0.5);
+      {{exit}}
+</script>

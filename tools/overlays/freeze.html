@@ -1,0 +1,41 @@
+<!-- 疊加卡片模板 freeze(定格成一張照片)
+     來源:HyperFrames registry「freeze-frame-dressing」(紙張色塊 + 兩條膠帶 + 閃光)。原版只有「裝飾」、要自己先定格;
+     改編:overlays.py 用 ffmpeg 把定格那一格截成 PNG(seek 安全、跟 render 一致,不靠 0 倍速影片),
+     底下鋪同一張圖的模糊暗版,上面那張縮成 86% 加白邊、歪一點 = 拍立得;紙張色塊、膠帶、閃光照原版時序縮短。
+     參數:tilt(歪幾度,預設 -2.5)、variant(photo / comedy,只換音效)。 -->
+<style>
+      .ov-freeze { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+      .ov-fz-bg { position:absolute; inset:-40px; width:calc(100% + 80px); height:calc(100% + 80px); object-fit:cover;
+        filter:blur(22px) brightness(.5) saturate(.8); }
+      .ov-fz-photo { position:absolute; left:7%; top:6%; width:86%; height:86%; padding:22px 22px 70px; background:#FBF8F1;
+        box-shadow:0 30px 70px rgba(0,0,0,.55); box-sizing:border-box; }
+      .ov-fz-photo img { width:100%; height:100%; object-fit:cover; display:block; }
+      .ov-fz-paper { position:absolute; inset:22px 22px 70px; opacity:0; mix-blend-mode:screen;
+        background:linear-gradient(115deg, rgb(248 84 73 / 86%) 0 12%, transparent 12%),
+          linear-gradient(345deg, rgb(255 221 82 / 92%) 0 11%, transparent 11%),
+          linear-gradient(rgb(244 240 224 / 40%), rgb(244 240 224 / 40%)); }
+      .ov-fz-tape { position:absolute; width:190px; height:52px; opacity:0; background:rgb(255 236 168 / 80%);
+        border:1px solid rgb(110 91 55 / 18%); box-shadow:0 4px 12px rgb(20 16 10 / 22%); }
+      .ov-fz-flash { position:absolute; inset:0; opacity:0; background:#fff; }
+</style>
+<template>
+<img class="ov-fz-bg" id="{{u}}-bg" src="{{still}}" alt="">
+<div class="ov-fz-photo" id="{{u}}-photo" style="transform:rotate({{tilt}}deg);">
+  <img src="{{still}}" alt="">
+  <div class="ov-fz-paper" id="{{u}}-paper"></div>
+  <div class="ov-fz-tape" id="{{u}}-ta" style="left:-40px; top:30px; transform:rotate(-34deg);"></div>
+  <div class="ov-fz-tape" id="{{u}}-tb" style="right:-40px; bottom:40px; transform:rotate(-30deg);"></div>
+</div>
+<div class="ov-fz-flash" id="{{u}}-flash"></div>
+</template>
+<script>
+      gsap.set("#{{u}}-flash", { opacity: 1 });
+      {{O}}.fromTo("#{{u}}-photo", { scale: 1.163 }, { scale: 1, duration: 0.32, ease: "power3.out" }, 0);
+      {{O}}.to("#{{u}}-flash", { opacity: 0, duration: 0.26, ease: "power2.in" }, 0.04);
+      {{O}}.to("#{{u}}-paper", { opacity: 0.64, duration: 0.18, ease: "power2.out" }, 0.08);
+      {{O}}.fromTo("#{{u}}-ta", { opacity: 0, scale: 1.18 }, { opacity: 1, scale: 1, duration: 0.2, ease: "power2.out" }, 0.28);
+      {{O}}.fromTo("#{{u}}-tb", { opacity: 0, scale: 1.18 }, { opacity: 1, scale: 1, duration: 0.2, ease: "power2.out" }, 0.38);
+      {{O}}.to("#{{u}}-photo", { scale: 1.163, rotation: 0, duration: 0.22, ease: "power2.in" }, {{exit}});
+      {{O}}.to(["#{{u}}-paper", "#{{u}}-ta", "#{{u}}-tb"], { opacity: 0, duration: 0.18, ease: "power2.in" }, {{exit}});
+      {{O}}.to(["#{{u}}-photo", "#{{u}}-bg"], { opacity: 0, duration: 0.2, ease: "power1.in" }, {{exit}} + 0.04);
+</script>
